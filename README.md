@@ -7,9 +7,9 @@
 Readme in different languages:
 [EN](README.md) · [RU](README.ru.md)
 
-# 🦀 maxoxide
+# ![alt text](./max_logo.png "max_logo") maxoxide 
 
-An async Rust library for building bots on the [Max messenger](https://max.ru) platform,
+🦀 An async Rust library for building bots on the [Max messenger](https://max.ru) platform,
 inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ## Features

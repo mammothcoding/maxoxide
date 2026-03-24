@@ -7,9 +7,9 @@
 Readme на разных языках:
 [EN](README.md) · [RU](README.ru.md)
 
-# 🦀 maxoxide
+# ![alt text](./max_logo.png "max_logo") maxoxide
 
-Async Rust-библиотека для создания ботов на платформе [Max мессенджер](https://max.ru),
+🦀 Async Rust-библиотека для создания ботов на платформе [Max мессенджер](https://max.ru),
 вдохновлённая [teloxide](https://github.com/teloxide/teloxide).
 
 ## Возможности
