@@ -1,0 +1,45 @@
+[package]
+name = "maxoxide"
+version = "0.1.0"
+edition = "2024"
+description = "Async Rust library for the Max messenger Bot API"
+license = "MIT"
+repository = "https://github.com/mammothcoding/maxoxide"
+keywords = ["max", "messenger", "bot", "api", "async"]
+
+[features]
+default = []
+# Enable the axum-based webhook server
+webhook = ["dep:axum", "dep:tower", "dep:http-body-util", "dep:bytes"]
+
+[dependencies]
+reqwest = { version = "0.13", features = ["json", "multipart", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+
+# Optional webhook deps (feature = "webhook")
+axum           = { version = "0.8", optional = true }
+tower          = { version = "0.5", optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes          = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = "0.3"
+
+[[example]]
+name = "echo_bot"
+path = "examples/echo_bot.rs"
+
+[[example]]
+name = "keyboard_bot"
+path = "examples/keyboard_bot.rs"
+
+[[example]]
+name = "webhook_bot"
+path = "examples/webhook_bot.rs"
+required-features = ["webhook"]
