@@ -28,7 +28,7 @@ Readme на разных языках:
 
 ```toml
 [dependencies]
-maxoxide = { git = "https://github.com/yourname/maxoxide" }
+maxoxide = { git = "https://github.com/mammothcoding/maxoxide" }
 tokio    = { version = "1", features = ["full"] }
 
 # Для поддержки Webhook (продакшен):

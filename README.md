@@ -28,7 +28,7 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = { git = "https://github.com/yourname/maxoxide" }
+maxoxide = { git = "https://github.com/mammothcoding/maxoxide" }
 tokio    = { version = "1", features = ["full"] }
 
 # For webhook support (production):
