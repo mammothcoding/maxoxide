@@ -7,7 +7,7 @@
 Readme in different languages:
 [EN](README.md) · [RU](README.ru.md)
 
-# ![alt text](./max_logo.png "max_logo") maxoxide 
+# ![alt text](./max_logo.png "max_logo") maxoxide
 
 🦀 An async Rust library for building bots on the [Max messenger](https://max.ru) platform,
 inspired by [teloxide](https://github.com/teloxide/teloxide).
@@ -28,11 +28,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = { git = "https://github.com/mammothcoding/maxoxide" }
+maxoxide = "0.1"
 tokio    = { version = "1", features = ["full"] }
 
 # For webhook support (production):
-# maxoxide = { git = "...", features = ["webhook"] }
+# maxoxide = { version = "0.1", features = ["webhook"] }
 ```
 
 ```rust

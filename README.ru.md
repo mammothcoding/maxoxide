@@ -28,11 +28,11 @@ Readme на разных языках:
 
 ```toml
 [dependencies]
-maxoxide = { git = "https://github.com/mammothcoding/maxoxide" }
+maxoxide = "0.1"
 tokio    = { version = "1", features = ["full"] }
 
 # Для поддержки Webhook (продакшен):
-# maxoxide = { git = "...", features = ["webhook"] }
+# maxoxide = { version = "0.1", features = ["webhook"] }
 ```
 
 ```rust
