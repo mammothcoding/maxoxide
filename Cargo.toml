@@ -40,6 +40,10 @@ name = "keyboard_bot"
 path = "examples/keyboard_bot.rs"
 
 [[example]]
+name = "live_api_test"
+path = "examples/live_api_test.rs"
+
+[[example]]
 name = "webhook_bot"
 path = "examples/webhook_bot.rs"
 required-features = ["webhook"]

@@ -194,6 +194,7 @@ maxoxide/
 └── examples/
     ├── echo_bot.rs
     ├── keyboard_bot.rs
+    ├── live_api_test.rs
     └── webhook_bot.rs  (feature = "webhook")
 ```
 
@@ -202,6 +203,29 @@ maxoxide/
 ```bash
 cargo test
 ```
+
+## Live API test
+
+For real-data verification there is a separate interactive harness:
+
+```bash
+cargo кг
+```
+
+At startup it asks in the terminal for:
+
+- bot token
+- bot URL for the tester
+- optional webhook URL and secret
+- optional local file path for `upload_file`
+- HTTP timeout, polling timeout and delay between requests
+
+The harness then walks the tester through Max-client actions and records `PASS` / `FAIL` / `SKIP` for real API calls. It uses small delays between requests, drains the long-poll backlog before the run, and asks for explicit confirmation before destructive or non-reversible steps such as:
+
+- `set_my_commands`
+- `delete_chat`
+- `leave_chat`
+- visible group title edits
 
 ## License
 
