@@ -8,6 +8,25 @@ use crate::types::*;
 
 const BASE_URL: &str = "https://platform-api.max.ru";
 
+fn parse_success_payload<T: DeserializeOwned>(text: &str) -> std::result::Result<T, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(parsed) => Ok(parsed),
+        Err(original_error) => {
+            let nested_message = value.get("message").cloned();
+
+            match nested_message {
+                Some(message) => match serde_json::from_value::<T>(message) {
+                    Ok(parsed) => Ok(parsed),
+                    Err(_) => Err(original_error),
+                },
+                None => Err(original_error),
+            }
+        }
+    }
+}
+
 /// The main entry point for the Max Bot API.
 ///
 /// Holds an HTTP client and your bot token. All API methods are async and
@@ -42,6 +61,11 @@ impl Bot {
             .build()
             .expect("Failed to build HTTP client");
 
+        Self::with_client(token, client)
+    }
+
+    /// Create a new bot with a custom HTTP client.
+    pub fn with_client(token: impl Into<String>, client: Client) -> Self {
         Bot {
             inner: Arc::new(BotInner {
                 token: token.into(),
@@ -193,7 +217,7 @@ impl Bot {
         debug!("Response {status}: {text}");
 
         if status.is_success() {
-            serde_json::from_str(&text).map_err(MaxError::Json)
+            parse_success_payload(&text).map_err(MaxError::Json)
         } else {
             // Try to extract an error message from the JSON body.
             let message = serde_json::from_str::<serde_json::Value>(&text)
@@ -507,5 +531,43 @@ impl Bot {
 impl std::fmt::Debug for Bot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Bot").field("token", &"[REDACTED]").finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_success_payload;
+    use crate::types::Message;
+
+    #[test]
+    fn parse_success_payload_supports_direct_message_response() {
+        let json = r#"{
+            "sender": {"user_id": 1, "name": "Alice"},
+            "recipient": {"chat_id": 42, "chat_type": "dialog"},
+            "timestamp": 1700000000,
+            "body": {"mid": "mid_1", "seq": 1, "text": "hello"}
+        }"#;
+
+        let message: Message = parse_success_payload(json).expect("direct message response");
+        assert_eq!(message.chat_id(), 42);
+        assert_eq!(message.message_id(), "mid_1");
+        assert_eq!(message.text(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_success_payload_supports_wrapped_message_response() {
+        let json = r#"{
+            "message": {
+                "sender": {"user_id": 1, "name": "Alice"},
+                "recipient": {"chat_id": 42, "chat_type": "dialog"},
+                "timestamp": 1700000000,
+                "body": {"mid": "mid_1", "seq": 1, "text": "hello"}
+            }
+        }"#;
+
+        let message: Message = parse_success_payload(json).expect("wrapped message response");
+        assert_eq!(message.chat_id(), 42);
+        assert_eq!(message.message_id(), "mid_1");
+        assert_eq!(message.text(), Some("hello"));
     }
 }

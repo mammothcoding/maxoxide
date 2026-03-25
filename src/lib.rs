@@ -45,3 +45,4 @@ mod tests;
 pub use bot::Bot;
 pub use dispatcher::{Context, Dispatcher, Filter};
 pub use errors::{MaxError, Result};
+pub use reqwest;
