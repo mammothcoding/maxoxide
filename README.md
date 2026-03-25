@@ -235,7 +235,7 @@ cargo test
 For real-data verification there is a separate interactive harness:
 
 ```bash
-cargo кгкг
+cargo run --example live_api_test
 ```
 
 At startup it asks in the terminal for:
