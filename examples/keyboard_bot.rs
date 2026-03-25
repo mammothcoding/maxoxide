@@ -31,7 +31,9 @@ async fn main() {
             };
 
             let body = NewMessageBody::text("Выбери цвет:").with_keyboard(keyboard);
-            ctx.bot.send_message(message.chat_id(), body).await?;
+            ctx.bot
+                .send_message_to_chat(message.chat_id(), body)
+                .await?;
         }
         Ok(())
     });

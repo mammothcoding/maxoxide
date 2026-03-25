@@ -17,7 +17,7 @@ async fn main() {
     dp.on_command("/start", |ctx: Context| async move {
         if let Update::MessageCreated { message, .. } = &ctx.update {
             ctx.bot
-                .send_markdown(
+                .send_markdown_to_chat(
                     message.chat_id(),
                     "Привет! Я эхо-бот. Напиши что-нибудь, и я отвечу тем же 🤖",
                 )
@@ -30,7 +30,7 @@ async fn main() {
     dp.on_message(|ctx: Context| async move {
         if let Update::MessageCreated { message, .. } = &ctx.update {
             let text = message.text().unwrap_or("(без текста)").to_string();
-            ctx.bot.send_text(message.chat_id(), text).await?;
+            ctx.bot.send_text_to_chat(message.chat_id(), text).await?;
         }
         Ok(())
     });

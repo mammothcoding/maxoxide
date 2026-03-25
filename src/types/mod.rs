@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ────────────────────────────────────────────────
 // User / Bot info
@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 /// Represents a Max user or bot.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
+    /// Global MAX user identifier.
+    ///
+    /// Do not confuse this with `chat_id`: one user can appear in different
+    /// private dialogs or group chats, each with its own `chat_id`.
     pub user_id: i64,
     pub name: String,
     pub username: Option<String>,
@@ -31,6 +35,9 @@ pub enum ChatType {
 /// Represents a Max chat (dialog or group).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Chat {
+    /// Identifier of a concrete dialog, group, or channel.
+    ///
+    /// Do not confuse this with a user's global `user_id`.
     pub chat_id: i64,
     pub r#type: ChatType,
     pub status: Option<String>,
@@ -97,7 +104,10 @@ pub struct Message {
 }
 
 impl Message {
-    /// Shortcut: get the chat_id this message was sent in.
+    /// Shortcut: get the `chat_id` this message was sent in.
+    ///
+    /// This is the dialog/group/channel identifier, not the sender's global
+    /// MAX `user_id`.
     pub fn chat_id(&self) -> i64 {
         self.recipient.chat_id
     }
@@ -113,10 +123,16 @@ impl Message {
     }
 }
 
+/// Target chat metadata attached to a received message.
+///
+/// In private dialogs, `chat_id` is the ID of the dialog itself, while
+/// `user_id` can carry the global MAX user ID of the peer.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Recipient {
+    /// ID of the concrete dialog/group/channel that received the message.
     pub chat_id: i64,
     pub chat_type: ChatType,
+    /// Optional global MAX user ID for dialog recipients.
     pub user_id: Option<i64>,
 }
 
@@ -125,12 +141,29 @@ pub struct MessageBody {
     pub mid: String,
     pub seq: i64,
     pub text: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_attachments_lossy")]
     pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageStat {
     pub views: Option<i32>,
+}
+
+fn deserialize_attachments_lossy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<Attachment>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+
+    Ok(raw.map(|items| {
+        items
+            .into_iter()
+            .map(|value| serde_json::from_value::<Attachment>(value).unwrap_or(Attachment::Unknown))
+            .collect()
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -249,9 +282,17 @@ pub enum Button {
         text: String,
         intent: Option<ButtonIntent>,
     },
-    /// Requests the user's phone number.
+    /// Requests the user's contact card.
+    ///
+    /// MAX documents this button, but live tests have observed contact updates
+    /// with empty `contact_id` and `vcf_phone`, so phone delivery is not
+    /// currently guaranteed on the MAX side.
     RequestContact { text: String },
     /// Requests the user's geo location.
+    ///
+    /// MAX documents this button, but live tests have observed the client-side
+    /// location card without a matching bot update, so end-to-end delivery is
+    /// not currently guaranteed on the MAX side.
     RequestGeoLocation { text: String, quick: Option<bool> },
 }
 

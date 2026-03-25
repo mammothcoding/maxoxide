@@ -31,7 +31,7 @@
 //!         }]),
 //!         ..Default::default()
 //!     };
-//!     bot.send_message(12345678, body).await.unwrap();
+//!     bot.send_message_to_chat(12345678, body).await.unwrap();
 //! }
 //! ```
 

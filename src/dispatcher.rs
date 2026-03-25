@@ -59,7 +59,9 @@ where
 ///
 ///     dp.on_message(|ctx: Context| async move {
 ///         if let maxoxide::types::Update::MessageCreated { message, .. } = &ctx.update {
-///             ctx.bot.send_text(message.chat_id(), message.text().unwrap_or("")).await?;
+///             ctx.bot
+///                 .send_text_to_chat(message.chat_id(), message.text().unwrap_or(""))
+///                 .await?;
 ///         }
 ///         Ok(())
 ///     });

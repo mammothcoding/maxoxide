@@ -21,6 +21,7 @@ type AnyResult<T> = Result<T, Box<dyn Error>>;
 const PRIVATE_WAIT_SECS: u64 = 180;
 const GROUP_WAIT_SECS: u64 = 240;
 const MANUAL_WAIT_SECS: u64 = 120;
+const WAIT_PROMPT_CHUNK_SECS: u64 = 15;
 
 #[derive(Clone, Copy)]
 enum Language {
@@ -138,21 +139,41 @@ async fn main() -> AnyResult<()> {
         }
     }
 
-    let private_chat_id = run_private_phase(&mut harness, &mut report, &config).await?;
-    run_upload_phase(&mut harness, &mut report, private_chat_id, &config).await?;
+    let private_phase = run_private_phase(&mut harness, &mut report, &config).await?;
+    run_upload_phase(
+        &mut harness,
+        &mut report,
+        private_phase.chat_id,
+        private_phase.user_id,
+        &config,
+    )
+    .await?;
     run_webhook_phase(&mut harness, &mut report, &config).await?;
     run_commands_phase(&mut harness, &mut report, lang).await?;
-    run_group_phase(&mut harness, &mut report, &config, &known_chats).await?;
+    run_group_phase(
+        &mut harness,
+        &mut report,
+        &config,
+        &known_chats,
+        private_phase.user_id,
+    )
+    .await?;
 
     report.print_summary(lang);
     Ok(())
+}
+
+#[derive(Default)]
+struct PrivatePhaseState {
+    chat_id: Option<i64>,
+    user_id: Option<i64>,
 }
 
 async fn run_private_phase(
     harness: &mut Harness,
     report: &mut Report,
     config: &Config,
-) -> AnyResult<Option<i64>> {
+) -> AnyResult<PrivatePhaseState> {
     let lang = config.lang;
 
     print_section(tr(lang, "Private Chat", "Личный чат"));
@@ -197,10 +218,14 @@ async fn run_private_phase(
             report,
             &[
                 "bot.get_chat(private)",
-                "bot.send_text",
-                "bot.send_markdown",
+                "bot.send_text_to_chat",
+                "bot.send_text_to_user",
+                "bot.send_markdown_to_chat",
+                "bot.send_markdown_to_user",
+                "bot.send_message_to_chat(text_body)",
+                "bot.send_message_to_user(text_body)",
                 "bot.send_action",
-                "bot.send_message(keyboard)",
+                "bot.send_message_to_chat(keyboard)",
                 "bot.answer_callback",
                 "bot.edit_message",
                 "bot.get_message",
@@ -213,10 +238,11 @@ async fn run_private_phase(
                 "активация личного чата не была завершена",
             ),
         );
-        return Ok(None);
+        return Ok(PrivatePhaseState::default());
     };
 
     let private_chat_id = message.chat_id();
+    let mut private_user_id = message.sender.as_ref().map(|user| user.user_id);
     match lang {
         Language::English => println!("Private chat id: {private_chat_id}"),
         Language::Russian => println!("ID личного чата: {private_chat_id}"),
@@ -229,36 +255,95 @@ async fn run_private_phase(
         .await;
 
     let plain_message = harness
-        .api_case(report, "bot.send_text", move |bot| async move {
-            bot.send_text(private_chat_id, "maxoxide live test: plain text message")
+        .api_case(report, "bot.send_text_to_chat", move |bot| async move {
+            bot.send_text_to_chat(private_chat_id, "maxoxide live test: plain text message")
                 .await
         })
         .await;
 
-    let _ = harness
-        .api_case(report, "bot.send_markdown", move |bot| async move {
-            bot.send_markdown(private_chat_id, "*maxoxide live test*: `send_markdown`")
-                .await
-        })
-        .await;
-
-    if harness
-        .api_case(report, "bot.send_action", move |bot| async move {
-            bot.send_action(private_chat_id, "typing").await
-        })
-        .await
-        .is_some()
-    {
-        confirm_case(
-            lang,
-            report,
-            "manual.observe_typing_indicator",
+    if let Some(user_id) = private_user_id {
+        let _ = harness
+            .api_case(report, "bot.send_text_to_user", move |bot| async move {
+                bot.send_text_to_user(user_id, "maxoxide live test: send_text_to_user")
+                    .await
+            })
+            .await;
+    } else {
+        report.skip(
+            "bot.send_text_to_user",
             tr(
                 lang,
-                "Did the typing indicator become visible in the private chat?",
-                "Появился ли в личном чате индикатор набора текста?",
+                "sender.user_id is missing",
+                "sender.user_id отсутствует",
             ),
-        )?;
+        );
+    }
+
+    let _ = harness
+        .api_case(report, "bot.send_markdown_to_chat", move |bot| async move {
+            bot.send_markdown_to_chat(
+                private_chat_id,
+                "*maxoxide live test*: `send_markdown_to_chat`",
+            )
+            .await
+        })
+        .await;
+
+    if let Some(user_id) = private_user_id {
+        let _ = harness
+            .api_case(report, "bot.send_markdown_to_user", move |bot| async move {
+                bot.send_markdown_to_user(user_id, "*maxoxide live test*: `send_markdown_to_user`")
+                    .await
+            })
+            .await;
+    } else {
+        report.skip(
+            "bot.send_markdown_to_user",
+            tr(
+                lang,
+                "sender.user_id is missing",
+                "sender.user_id отсутствует",
+            ),
+        );
+    }
+
+    let _ = harness
+        .api_case(
+            report,
+            "bot.send_message_to_chat(text_body)",
+            move |bot| async move {
+                bot.send_message_to_chat(
+                    private_chat_id,
+                    NewMessageBody::text("maxoxide live test: send_message_to_chat"),
+                )
+                .await
+            },
+        )
+        .await;
+
+    if let Some(user_id) = private_user_id {
+        let _ = harness
+            .api_case(
+                report,
+                "bot.send_message_to_user(text_body)",
+                move |bot| async move {
+                    bot.send_message_to_user(
+                        user_id,
+                        NewMessageBody::text("maxoxide live test: send_message_to_user"),
+                    )
+                    .await
+                },
+            )
+            .await;
+    } else {
+        report.skip(
+            "bot.send_message_to_user(text_body)",
+            tr(
+                lang,
+                "sender.user_id is missing",
+                "sender.user_id отсутствует",
+            ),
+        );
     }
 
     let callback_button_text = tr(lang, "Confirm callback", "Подтвердить callback");
@@ -284,7 +369,7 @@ async fn run_private_phase(
             }],
             vec![Button::RequestGeoLocation {
                 text: location_button_text.into(),
-                quick: Some(true),
+                quick: None,
             }],
             vec![Button::link(
                 link_button_text,
@@ -297,8 +382,11 @@ async fn run_private_phase(
     let keyboard_message = harness
         .api_case(
             report,
-            "bot.send_message(keyboard)",
-            move |bot| async move { bot.send_message(private_chat_id, keyboard_body).await },
+            "bot.send_message_to_chat(keyboard)",
+            move |bot| async move {
+                bot.send_message_to_chat(private_chat_id, keyboard_body)
+                    .await
+            },
         )
         .await;
 
@@ -428,7 +516,7 @@ async fn run_private_phase(
             ),
             false,
         )? {
-            let _ = harness
+            let contact_update = harness
                 .wait_case(
                     report,
                     "manual.contact_share",
@@ -447,9 +535,47 @@ async fn run_private_phase(
                     },
                 )
                 .await;
+
+            if let Some(update) = contact_update {
+                if let Some(phone) = extract_contact_phone(&update) {
+                    report.pass(
+                        "manual.contact_phone_present",
+                        match lang {
+                            Language::English => format!("phone={phone}"),
+                            Language::Russian => format!("телефон={phone}"),
+                        },
+                    );
+                } else {
+                    report.fail(
+                        "manual.contact_phone_present",
+                        tr(
+                            lang,
+                            "contact attachment was received, but vcf_phone is empty",
+                            "contact-вложение пришло, но поле vcf_phone пустое",
+                        ),
+                    );
+                }
+            } else {
+                report.skip(
+                    "manual.contact_phone_present",
+                    tr(
+                        lang,
+                        "contact share step did not complete",
+                        "шаг отправки контакта не был завершён",
+                    ),
+                );
+            }
         } else {
             report.skip(
                 "manual.contact_share",
+                tr(
+                    lang,
+                    "tester skipped contact share",
+                    "тестер пропустил отправку контакта",
+                ),
+            );
+            report.skip(
+                "manual.contact_phone_present",
                 tr(
                     lang,
                     "tester skipped contact share",
@@ -544,6 +670,121 @@ async fn run_private_phase(
         lang,
         tr(
             lang,
+            "Test `/get_my_id` now? Type `y`, then send `/get_my_id` to the bot.",
+            "Проверить `/get_my_id` сейчас? Введите `y`, затем отправьте `/get_my_id` боту.",
+        ),
+        false,
+    )? {
+        let get_my_id_update = harness
+            .wait_case(
+                report,
+                "manual.get_my_id_command",
+                tr(
+                    lang,
+                    "Send `/get_my_id` in the private chat.",
+                    "Отправьте `/get_my_id` в личный чат.",
+                ),
+                Duration::from_secs(MANUAL_WAIT_SECS),
+                |update| match update {
+                    Update::MessageCreated { message, .. } => {
+                        message.chat_id() == private_chat_id && message.text() == Some("/get_my_id")
+                    }
+                    _ => false,
+                },
+            )
+            .await;
+
+        if let Some(update) = get_my_id_update {
+            if let Some(user_id) = extract_sender_user_id(&update) {
+                private_user_id = Some(user_id);
+                report.pass(
+                    "manual.get_my_id_user_id",
+                    match lang {
+                        Language::English => format!("user_id={user_id}"),
+                        Language::Russian => format!("user_id={user_id}"),
+                    },
+                );
+
+                let reply_text = match lang {
+                    Language::English => format!("Your Max ID: {user_id}"),
+                    Language::Russian => format!("Ваш Max ID: {user_id}"),
+                };
+                let _ = harness
+                    .api_case(
+                        report,
+                        "bot.send_text_to_chat(get_my_id_response)",
+                        move |bot| async move {
+                            bot.send_text_to_chat(private_chat_id, reply_text).await
+                        },
+                    )
+                    .await;
+            } else {
+                report.fail(
+                    "manual.get_my_id_user_id",
+                    tr(
+                        lang,
+                        "message was received, but sender.user_id is missing",
+                        "сообщение получено, но sender.user_id отсутствует",
+                    ),
+                );
+                report.skip(
+                    "bot.send_text_to_chat(get_my_id_response)",
+                    tr(
+                        lang,
+                        "sender.user_id is missing",
+                        "sender.user_id отсутствует",
+                    ),
+                );
+            }
+        } else {
+            report.skip(
+                "manual.get_my_id_user_id",
+                tr(
+                    lang,
+                    "`/get_my_id` step did not complete",
+                    "шаг `/get_my_id` не был завершён",
+                ),
+            );
+            report.skip(
+                "bot.send_text_to_chat(get_my_id_response)",
+                tr(
+                    lang,
+                    "`/get_my_id` step did not complete",
+                    "шаг `/get_my_id` не был завершён",
+                ),
+            );
+        }
+    } else {
+        report.skip(
+            "manual.get_my_id_command",
+            tr(
+                lang,
+                "tester skipped `/get_my_id`",
+                "тестер пропустил `/get_my_id`",
+            ),
+        );
+        report.skip(
+            "manual.get_my_id_user_id",
+            tr(
+                lang,
+                "tester skipped `/get_my_id`",
+                "тестер пропустил `/get_my_id`",
+            ),
+        );
+        report.skip(
+            "bot.send_text_to_chat(get_my_id_response)",
+            tr(
+                lang,
+                "tester skipped `/get_my_id`",
+                "тестер пропустил `/get_my_id`",
+            ),
+        );
+    }
+
+    if confirm(
+        lang,
+        tr(
+            lang,
             "Test edited-message update? Type `y`, then edit your last text message in Max.",
             "Проверить событие редактирования сообщения? Введите `y`, затем отредактируйте последнее текстовое сообщение в Max.",
         ),
@@ -622,13 +863,17 @@ async fn run_private_phase(
         );
     }
 
-    Ok(Some(private_chat_id))
+    Ok(PrivatePhaseState {
+        chat_id: Some(private_chat_id),
+        user_id: private_user_id,
+    })
 }
 
 async fn run_upload_phase(
     harness: &mut Harness,
     report: &mut Report,
     private_chat_id: Option<i64>,
+    private_user_id: Option<i64>,
     config: &Config,
 ) -> AnyResult<()> {
     let lang = config.lang;
@@ -695,13 +940,13 @@ async fn run_upload_phase(
             let _ = harness
                 .api_case(
                     report,
-                    "bot.send_message(upload_file_attachment)",
-                    move |bot| async move { bot.send_message(chat_id, body).await },
+                    "bot.send_message_to_chat(upload_file_attachment)",
+                    move |bot| async move { bot.send_message_to_chat(chat_id, body).await },
                 )
                 .await;
         } else {
             report.skip(
-                "bot.send_message(upload_file_attachment)",
+                "bot.send_message_to_chat(upload_file_attachment)",
                 tr(
                     lang,
                     "upload_file did not return a token",
@@ -709,10 +954,21 @@ async fn run_upload_phase(
                 ),
             );
         }
+    } else {
+        report.skip(
+            "bot.send_message_to_chat(upload_file_attachment)",
+            tr(
+                lang,
+                "private chat is not available",
+                "личный чат недоступен",
+            ),
+        );
+    }
 
+    if let Some(user_id) = private_user_id {
         if let Some(token) = upload_bytes_token {
             let body = NewMessageBody {
-                text: Some("File attachment sent via upload_bytes.".into()),
+                text: Some("File attachment sent via upload_bytes to user_id.".into()),
                 attachments: Some(vec![NewAttachment::File {
                     payload: UploadedToken { token },
                 }]),
@@ -721,13 +977,13 @@ async fn run_upload_phase(
             let _ = harness
                 .api_case(
                     report,
-                    "bot.send_message(upload_bytes_attachment)",
-                    move |bot| async move { bot.send_message(chat_id, body).await },
+                    "bot.send_message_to_user(upload_bytes_attachment)",
+                    move |bot| async move { bot.send_message_to_user(user_id, body).await },
                 )
                 .await;
         } else {
             report.skip(
-                "bot.send_message(upload_bytes_attachment)",
+                "bot.send_message_to_user(upload_bytes_attachment)",
                 tr(
                     lang,
                     "upload_bytes did not return a token",
@@ -736,16 +992,12 @@ async fn run_upload_phase(
             );
         }
     } else {
-        skip_cases(
-            report,
-            &[
-                "bot.send_message(upload_file_attachment)",
-                "bot.send_message(upload_bytes_attachment)",
-            ],
+        report.skip(
+            "bot.send_message_to_user(upload_bytes_attachment)",
             tr(
                 lang,
-                "private chat is not available",
-                "личный чат недоступен",
+                "private user_id is not available",
+                "private user_id недоступен",
             ),
         );
     }
@@ -816,8 +1068,8 @@ async fn run_commands_phase(
         lang,
         tr(
             lang,
-            "Test bot.set_my_commands? This changes the bot command menu and is not restored automatically. Type `y` to proceed.",
-            "Проверить bot.set_my_commands? Это изменит меню команд бота и автоматически не откатывается. Введите `y`, чтобы продолжить.",
+            "Probe experimental bot.set_my_commands? The public MAX REST API does not currently document a write endpoint and may return 404. This also changes the bot command menu and is not restored automatically. Type `y` to proceed.",
+            "Проверить экспериментальный bot.set_my_commands? Публичный REST API MAX сейчас не документирует write-эндпоинт и может вернуть 404. Также это изменит меню команд бота и автоматически не откатывается. Введите `y`, чтобы продолжить.",
         ),
         false,
     )? {
@@ -831,18 +1083,40 @@ async fn run_commands_phase(
                 description: "Trigger the group phase".into(),
             },
         ];
-        let _ = harness
-            .api_case(report, "bot.set_my_commands", move |bot| async move {
-                bot.set_my_commands(commands).await
-            })
-            .await;
+        harness.pause().await;
+        print_case("bot.set_my_commands");
+        let bot = harness.bot.clone();
+        match bot.set_my_commands(commands).await {
+            Ok(_) => {
+                report.pass("bot.set_my_commands", tr(lang, "ok", "ok"));
+                println!("   PASS");
+            }
+            Err(err) => {
+                let err_text = err.to_string();
+                if err_text.contains("/me/commands")
+                    && err_text.contains("404")
+                    && err_text.contains("not recognized")
+                {
+                    let detail = tr(
+                        lang,
+                        "public MAX API does not currently expose POST /me/commands; treating this as a platform gap",
+                        "публичный MAX API сейчас не предоставляет POST /me/commands; шаг помечен как платформенное ограничение",
+                    );
+                    report.skip("bot.set_my_commands", detail);
+                    println!("   SKIP: {detail}");
+                } else {
+                    report.fail("bot.set_my_commands", err_text.clone());
+                    println!("   FAIL: {err}");
+                }
+            }
+        }
     } else {
         report.skip(
             "bot.set_my_commands",
             tr(
                 lang,
-                "tester did not confirm the irreversible command-menu change",
-                "тестер не подтвердил необратимое изменение меню команд",
+                "tester did not confirm probing the experimental command-menu endpoint",
+                "тестер не подтвердил проверку экспериментального эндпоинта меню команд",
             ),
         );
     }
@@ -855,8 +1129,48 @@ async fn run_group_phase(
     report: &mut Report,
     config: &Config,
     known_chats: &[Chat],
+    known_user_id: Option<i64>,
 ) -> AnyResult<()> {
     let lang = config.lang;
+
+    if !confirm(
+        lang,
+        tr(
+            lang,
+            "Run the optional group-chat phase now? Type `y` to continue, anything else to skip.",
+            "Запустить необязательный этап с групповым чатом сейчас? Введите `y`, чтобы продолжить, иначе этап будет пропущен.",
+        ),
+        false,
+    )? {
+        skip_cases(
+            report,
+            &[
+                "manual.group_activation",
+                "bot.get_chat(group)",
+                "bot.get_members",
+                "bot.get_admins",
+                "bot.get_my_membership",
+                "bot.send_action",
+                "manual.observe_typing_indicator",
+                "bot.send_message_to_chat(group)",
+                "bot.pin_message",
+                "bot.get_pinned_message",
+                "bot.unpin_message",
+                "bot.edit_chat",
+                "bot.edit_chat(rollback)",
+                "bot.add_members",
+                "bot.remove_member",
+                "bot.delete_chat",
+                "bot.leave_chat",
+            ],
+            tr(
+                lang,
+                "tester skipped the optional group-chat phase",
+                "тестер пропустил необязательный этап с групповым чатом",
+            ),
+        );
+        return Ok(());
+    }
 
     print_section(tr(lang, "Group Chat", "Групповой чат"));
     println!(
@@ -878,6 +1192,17 @@ async fn run_group_phase(
             "2. Отправьте `/group_live` в этой группе.",
         )
     );
+    if let Some(user_id) = known_user_id {
+        println!(
+            "{}",
+            match lang {
+                Language::English => format!("Known user_id from the private phase: {user_id}"),
+                Language::Russian => {
+                    format!("Известный user_id из личного этапа: {user_id}")
+                }
+            }
+        );
+    }
 
     let activated_chat_id = harness
         .wait_case(
@@ -965,11 +1290,14 @@ async fn run_group_phase(
         })
         .await;
 
-    let _ = harness
+    let members = harness
         .api_case(report, "bot.get_members", move |bot| async move {
             bot.get_members(group_chat_id, Some(100), None).await
         })
         .await;
+    if let Some(members) = members.as_ref() {
+        print_chat_members(&members.members, lang);
+    }
 
     let _ = harness
         .api_case(report, "bot.get_admins", move |bot| async move {
@@ -983,14 +1311,50 @@ async fn run_group_phase(
         })
         .await;
 
-    let group_message = harness
-        .api_case(report, "bot.send_message(group)", move |bot| async move {
-            bot.send_message(
-                group_chat_id,
-                NewMessageBody::text("maxoxide live test: group message for pin/edit flow"),
-            )
-            .await
+    if harness
+        .api_case(report, "bot.send_action", move |bot| async move {
+            bot.send_action(group_chat_id, "typing_on").await
         })
+        .await
+        .is_some()
+    {
+        if confirm(
+            lang,
+            tr(
+                lang,
+                "Did the typing indicator become visible in the group chat?",
+                "Появился ли в групповом чате индикатор набора текста?",
+            ),
+            true,
+        )? {
+            report.pass(
+                "manual.observe_typing_indicator",
+                tr(lang, "tester confirmed", "тестер подтвердил"),
+            );
+        } else {
+            report.skip(
+                "manual.observe_typing_indicator",
+                tr(
+                    lang,
+                    "MAX client did not show a visible typing indicator; treating this as a current platform gap",
+                    "клиент MAX не показал видимый индикатор набора текста; шаг помечен как текущее платформенное ограничение",
+                ),
+            );
+        }
+    }
+
+    let group_message = harness
+        .api_case(
+            report,
+            "bot.send_message_to_chat(group)",
+            move |bot| async move {
+                bot.send_message_to_chat(
+                    group_chat_id,
+                    NewMessageBody::text("maxoxide live test: group message for pin/edit flow"),
+                )
+                .await
+            },
+        )
         .await;
 
     if let Some(group_message) = group_message {
@@ -1435,33 +1799,78 @@ impl Harness {
     {
         print_case(name);
         println!("   {instructions}");
-        match self.wait_for_update(timeout, predicate).await {
-            Ok(update) => {
-                report.pass(name, tr(self.lang, "event received", "событие получено"));
-                println!("   PASS");
-                Some(update)
+        let started = Instant::now();
+
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                let detail = tr(
+                    self.lang,
+                    "timeout while waiting for update",
+                    "таймаут ожидания обновления",
+                );
+                report.fail(name, detail);
+                println!("   FAIL: {detail}");
+                return None;
             }
-            Err(err) => {
-                report.fail(name, err.to_string());
-                println!("   FAIL: {err}");
-                None
+
+            let chunk = remaining.min(Duration::from_secs(WAIT_PROMPT_CHUNK_SECS));
+            match self.wait_for_update_chunk(chunk, &predicate).await {
+                Ok(Some(update)) => {
+                    report.pass(name, tr(self.lang, "event received", "событие получено"));
+                    println!("   PASS");
+                    print_update_details(self.lang, &update);
+                    return Some(update);
+                }
+                Ok(None) => match prompt_wait_decision(self.lang) {
+                    Ok(WaitDecision::Continue) => continue,
+                    Ok(WaitDecision::Skip) => {
+                        let detail = tr(
+                            self.lang,
+                            "tester skipped this waiting step",
+                            "тестер пропустил этот шаг ожидания",
+                        );
+                        report.skip(name, detail);
+                        println!("   SKIP: {detail}");
+                        return None;
+                    }
+                    Ok(WaitDecision::Fail) => {
+                        let detail = tr(
+                            self.lang,
+                            "tester marked this waiting step as failed",
+                            "тестер пометил этот шаг ожидания как проваленный",
+                        );
+                        report.fail(name, detail);
+                        println!("   FAIL: {detail}");
+                        return None;
+                    }
+                    Err(err) => {
+                        report.fail(name, err.to_string());
+                        println!("   FAIL: {err}");
+                        return None;
+                    }
+                },
+                Err(err) => {
+                    report.fail(name, err.to_string());
+                    println!("   FAIL: {err}");
+                    return None;
+                }
             }
         }
     }
 
-    async fn wait_for_update<F>(&mut self, timeout: Duration, predicate: F) -> AnyResult<Update>
+    async fn wait_for_update_chunk<F>(
+        &mut self,
+        timeout: Duration,
+        predicate: &F,
+    ) -> AnyResult<Option<Update>>
     where
         F: Fn(&Update) -> bool,
     {
         let started = Instant::now();
         loop {
             if started.elapsed() >= timeout {
-                return Err(tr(
-                    self.lang,
-                    "timeout while waiting for update",
-                    "таймаут ожидания обновления",
-                )
-                .into());
+                return Ok(None);
             }
 
             self.pause().await;
@@ -1479,7 +1888,7 @@ impl Harness {
 
             for update in response.updates {
                 if predicate(&update) {
-                    return Ok(update);
+                    return Ok(Some(update));
                 }
             }
         }
@@ -1572,6 +1981,12 @@ enum Outcome {
     Skipped(String),
 }
 
+enum WaitDecision {
+    Continue,
+    Skip,
+    Fail,
+}
+
 fn prepare_upload_file(path: Option<&Path>) -> AnyResult<PathBuf> {
     if let Some(path) = path {
         return Ok(path.to_path_buf());
@@ -1601,10 +2016,7 @@ fn is_location(attachment: &Attachment) -> bool {
 }
 
 fn is_non_keyboard_attachment(attachment: &Attachment) -> bool {
-    !matches!(
-        attachment,
-        Attachment::InlineKeyboard { .. } | Attachment::Unknown
-    )
+    !matches!(attachment, Attachment::InlineKeyboard { .. })
 }
 
 fn upload_type_name(upload_type: &UploadType) -> &'static str {
@@ -1619,6 +2031,122 @@ fn upload_type_name(upload_type: &UploadType) -> &'static str {
 fn skip_cases(report: &mut Report, names: &[&str], reason: &str) {
     for name in names {
         report.skip(*name, reason);
+    }
+}
+
+fn prompt_wait_decision(lang: Language) -> AnyResult<WaitDecision> {
+    loop {
+        let answer = prompt(tr(
+            lang,
+            "No matching update yet. Press Enter to continue waiting, type `skip` to skip, or `fail` to mark this step as failed",
+            "Подходящее обновление пока не пришло. Нажмите Enter, чтобы ждать дальше, введите `skip` для пропуска или `fail`, чтобы пометить шаг как проваленный",
+        ))?;
+
+        let normalized = answer.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "" | "c" | "continue" | "wait" | "ждать" => return Ok(WaitDecision::Continue),
+            "s" | "skip" | "пропуск" | "пропустить" => {
+                return Ok(WaitDecision::Skip);
+            }
+            "f" | "fail" | "ошибка" | "провал" => return Ok(WaitDecision::Fail),
+            _ => println!(
+                "{}",
+                tr(
+                    lang,
+                    "Expected Enter, `skip`, or `fail`.",
+                    "Ожидался Enter, `skip` или `fail`.",
+                )
+            ),
+        }
+    }
+}
+
+fn print_update_details(lang: Language, update: &Update) {
+    match update {
+        Update::MessageCallback { callback, .. } => {
+            println!("   callback_id: {}", callback.callback_id);
+            println!(
+                "   {}: {}",
+                tr(lang, "user_id", "user_id"),
+                callback.user.user_id
+            );
+            if let Some(payload) = &callback.payload {
+                println!("   payload: {payload}");
+            }
+        }
+        Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
+            if let Some(sender) = &message.sender {
+                println!("   {}: {}", tr(lang, "user_id", "user_id"), sender.user_id);
+                println!("   {}: {}", tr(lang, "sender", "отправитель"), sender.name);
+            }
+            if let Some(text) = message.text() {
+                println!("   {}: {text}", tr(lang, "text", "текст"));
+            }
+            if let Some(attachments) = &message.body.attachments {
+                for attachment in attachments {
+                    match attachment {
+                        Attachment::Contact { payload } => {
+                            println!(
+                                "   {}: {:?}",
+                                tr(lang, "contact_name", "имя_контакта"),
+                                payload.name
+                            );
+                            println!(
+                                "   {}: {:?}",
+                                tr(lang, "contact_id", "contact_id"),
+                                payload.contact_id
+                            );
+                            println!(
+                                "   {}: {:?}",
+                                tr(lang, "phone", "телефон"),
+                                payload.vcf_phone
+                            );
+                        }
+                        Attachment::Location { payload } => {
+                            println!(
+                                "   {}: {}, {}: {}",
+                                tr(lang, "latitude", "широта"),
+                                payload.latitude,
+                                tr(lang, "longitude", "долгота"),
+                                payload.longitude
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_contact_phone(update: &Update) -> Option<&str> {
+    let attachments = match update {
+        Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
+            message.body.attachments.as_ref()?
+        }
+        _ => return None,
+    };
+
+    attachments.iter().find_map(|attachment| match attachment {
+        Attachment::Contact { payload } => payload.vcf_phone.as_deref(),
+        _ => None,
+    })
+}
+
+fn extract_sender_user_id(update: &Update) -> Option<i64> {
+    match update {
+        Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
+            message.sender.as_ref().map(|user| user.user_id)
+        }
+        Update::MessageCallback { callback, .. } => Some(callback.user.user_id),
+        Update::BotStarted { user, .. }
+        | Update::BotAdded { user, .. }
+        | Update::BotRemoved { user, .. }
+        | Update::UserAdded { user, .. }
+        | Update::UserRemoved { user, .. }
+        | Update::ChatTitleChanged { user, .. } => Some(user.user_id),
+        Update::MessageRemoved { user_id, .. } => Some(*user_id),
     }
 }
 
@@ -1779,6 +2307,33 @@ fn print_known_chats(chats: &[Chat], lang: Language) {
             chat_type_name(&chat.r#type),
             title
         );
+    }
+}
+
+fn print_chat_members(members: &[maxoxide::types::ChatMember], lang: Language) {
+    if members.is_empty() {
+        println!(
+            "{}",
+            tr(
+                lang,
+                "No chat members were returned.",
+                "Участники чата не были возвращены.",
+            )
+        );
+        return;
+    }
+
+    println!(
+        "{}",
+        tr(
+            lang,
+            "Chat members returned by bot.get_members:",
+            "Участники, возвращённые bot.get_members:",
+        )
+    );
+
+    for member in members {
+        println!("  - {} {}", member.user_id, member.name);
     }
 }
 

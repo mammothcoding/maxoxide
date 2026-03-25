@@ -8,7 +8,9 @@ use crate::types::*;
 
 const BASE_URL: &str = "https://platform-api.max.ru";
 
-fn parse_success_payload<T: DeserializeOwned>(text: &str) -> std::result::Result<T, serde_json::Error> {
+fn parse_success_payload<T: DeserializeOwned>(
+    text: &str,
+) -> std::result::Result<T, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(text)?;
 
     match serde_json::from_value::<T>(value.clone()) {
@@ -51,6 +53,21 @@ pub struct Bot {
 struct BotInner {
     token: String,
     client: Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageRecipientQuery {
+    ChatId(i64),
+    UserId(i64),
+}
+
+impl MessageRecipientQuery {
+    fn into_query(self) -> [(&'static str, String); 1] {
+        match self {
+            Self::ChatId(chat_id) => [("chat_id", chat_id.to_string())],
+            Self::UserId(user_id) => [("user_id", user_id.to_string())],
+        }
+    }
 }
 
 impl Bot {
@@ -213,7 +230,8 @@ impl Bot {
 
     async fn parse<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
-        let text = resp.text().await?;
+        let bytes = resp.bytes().await?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         debug!("Response {status}: {text}");
 
         if status.is_success() {
@@ -250,28 +268,93 @@ impl Bot {
     // Messages
     // ────────────────────────────────────────────────
 
-    /// POST /messages — Send a message to a chat.
-    pub async fn send_message(&self, chat_id: i64, body: NewMessageBody) -> Result<Message> {
-        self.post_with_query("/messages", &body, [("chat_id", chat_id.to_string())])
+    async fn send_message_to_recipient(
+        &self,
+        recipient: MessageRecipientQuery,
+        body: NewMessageBody,
+    ) -> Result<Message> {
+        self.post_with_query("/messages", &body, recipient.into_query())
             .await
     }
 
-    /// Convenience: send a plain-text message.
-    pub async fn send_text(&self, chat_id: i64, text: impl Into<String>) -> Result<Message> {
-        self.send_message(chat_id, NewMessageBody::text(text)).await
+    /// POST /messages — Send a message to a chat/dialog by `chat_id`.
+    ///
+    /// `chat_id` identifies a concrete dialog, group, or channel.
+    /// It is not the same as a user's global MAX `user_id`.
+    pub async fn send_message_to_chat(
+        &self,
+        chat_id: i64,
+        body: NewMessageBody,
+    ) -> Result<Message> {
+        self.send_message_to_recipient(MessageRecipientQuery::ChatId(chat_id), body)
+            .await
     }
 
-    /// Convenience: send a Markdown-formatted message.
-    pub async fn send_markdown(&self, chat_id: i64, text: impl Into<String>) -> Result<Message> {
-        self.send_message(
+    /// POST /messages — Send a message to a user by global MAX `user_id`.
+    ///
+    /// Use this when you know the user's stable MAX identifier, but do not want
+    /// to address a specific dialog `chat_id`.
+    pub async fn send_message_to_user(
+        &self,
+        user_id: i64,
+        body: NewMessageBody,
+    ) -> Result<Message> {
+        self.send_message_to_recipient(MessageRecipientQuery::UserId(user_id), body)
+            .await
+    }
+
+    /// Convenience: send a plain-text message to a chat/dialog by `chat_id`.
+    pub async fn send_text_to_chat(
+        &self,
+        chat_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_chat(chat_id, NewMessageBody::text(text))
+            .await
+    }
+
+    /// Convenience: send a plain-text message to a user by global MAX `user_id`.
+    pub async fn send_text_to_user(
+        &self,
+        user_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_user(user_id, NewMessageBody::text(text))
+            .await
+    }
+
+    /// Convenience: send a Markdown-formatted message to a chat/dialog by `chat_id`.
+    pub async fn send_markdown_to_chat(
+        &self,
+        chat_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_chat(
             chat_id,
             NewMessageBody::text(text).with_format(MessageFormat::Markdown),
         )
         .await
     }
 
+    /// Convenience: send a Markdown-formatted message to a user by global MAX `user_id`.
+    pub async fn send_markdown_to_user(
+        &self,
+        user_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_user(
+            user_id,
+            NewMessageBody::text(text).with_format(MessageFormat::Markdown),
+        )
+        .await
+    }
+
     /// PUT /messages — Edit an existing message.
-    pub async fn edit_message(&self, message_id: &str, body: NewMessageBody) -> Result<Message> {
+    pub async fn edit_message(
+        &self,
+        message_id: &str,
+        body: NewMessageBody,
+    ) -> Result<SimpleResult> {
         self.put_with_query("/messages", &body, [("message_id", message_id)])
             .await
     }
@@ -310,7 +393,23 @@ impl Bot {
 
     /// POST /answers — Respond to an inline button callback.
     pub async fn answer_callback(&self, body: AnswerCallbackBody) -> Result<SimpleResult> {
-        self.post("/answers", &body).await
+        #[derive(serde::Serialize)]
+        struct AnswerBody {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message: Option<NewMessageBody>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            notification: Option<String>,
+        }
+
+        self.post_with_query(
+            "/answers",
+            &AnswerBody {
+                message: body.message,
+                notification: body.notification,
+            },
+            [("callback_id", body.callback_id)],
+        )
+        .await
     }
 
     // ────────────────────────────────────────────────
@@ -344,7 +443,14 @@ impl Bot {
         self.delete(&format!("/chats/{chat_id}")).await
     }
 
-    /// POST /chats/{chatId}/actions — Send a typing indicator.
+    /// POST /chats/{chatId}/actions — Send a bot action to a group chat.
+    ///
+    /// The Max API expects values such as `"typing_on"`, `"sending_photo"`,
+    /// `"sending_video"`, `"sending_audio"`, `"sending_file"` or `"mark_seen"`.
+    ///
+    /// Note: live MAX tests currently show successful API responses for
+    /// `"typing_on"`, but the client-side typing indicator is not reliably
+    /// visible. Treat the visual effect as a current MAX platform gap.
     pub async fn send_action(&self, chat_id: i64, action: &str) -> Result<SimpleResult> {
         #[derive(serde::Serialize)]
         struct ActionBody<'a> {
@@ -493,9 +599,14 @@ impl Bot {
     // Bot commands
     // ────────────────────────────────────────────────
 
-    /// Set the list of commands shown to users.
+    /// Attempt to set the list of commands shown to users.
     ///
-    /// This is a convenience that POSTs to the commands endpoint.
+    /// The public MAX REST docs expose bot commands in `GET /me`, but do not
+    /// currently document a write endpoint for updating that menu.
+    /// Live requests to `POST /me/commands` currently return
+    /// `404 Path /me/commands is not recognized`.
+    ///
+    /// This helper is kept for experimentation and future MAX support.
     pub async fn set_my_commands(&self, commands: Vec<BotCommand>) -> Result<SimpleResult> {
         #[derive(serde::Serialize)]
         struct CommandsBody {
@@ -536,7 +647,7 @@ impl std::fmt::Debug for Bot {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_success_payload;
+    use super::{MessageRecipientQuery, parse_success_payload};
     use crate::types::Message;
 
     #[test]
@@ -569,5 +680,21 @@ mod tests {
         assert_eq!(message.chat_id(), 42);
         assert_eq!(message.message_id(), "mid_1");
         assert_eq!(message.text(), Some("hello"));
+    }
+
+    #[test]
+    fn message_recipient_query_uses_chat_id_for_chat_targets() {
+        assert_eq!(
+            MessageRecipientQuery::ChatId(42).into_query(),
+            [("chat_id", "42".to_string())]
+        );
+    }
+
+    #[test]
+    fn message_recipient_query_uses_user_id_for_user_targets() {
+        assert_eq!(
+            MessageRecipientQuery::UserId(5465382).into_query(),
+            [("user_id", "5465382".to_string())]
+        );
     }
 }

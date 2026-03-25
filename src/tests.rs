@@ -132,6 +132,27 @@ mod tests {
     }
 
     #[test]
+    fn test_recipient_keeps_chat_id_and_user_id_distinct() {
+        let message = make_message(223_921_237, "hello");
+        assert_eq!(message.chat_id(), 223_921_237);
+        assert_eq!(message.recipient.user_id, Some(1));
+    }
+
+    #[test]
+    fn test_recipient_roundtrip_preserves_both_ids() {
+        let json = r#"{
+            "sender": {"user_id": 5465382, "name": "Konstantin"},
+            "recipient": {"chat_id": 223921237, "chat_type": "dialog", "user_id": 5465382},
+            "timestamp": 1700000000,
+            "body": {"mid": "mid_1", "seq": 1, "text": "hello"}
+        }"#;
+
+        let message: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(message.chat_id(), 223_921_237);
+        assert_eq!(message.recipient.user_id, Some(5_465_382));
+    }
+
+    #[test]
     fn test_chat_type_serde() {
         let dialog: ChatType = serde_json::from_str(r#""dialog""#).unwrap();
         let chat: ChatType = serde_json::from_str(r#""chat""#).unwrap();
