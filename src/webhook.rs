@@ -1,4 +1,4 @@
-//! Axum-based Webhook server — production-grade alternative to long polling.
+//! Axum-based Webhook server for receiving updates through HTTPS callbacks.
 //!
 //! Enabled with `features = ["webhook"]`.
 //!
@@ -68,7 +68,7 @@ use axum::{
 use bytes::Bytes;
 use tracing::{error, info, warn};
 
-use crate::{dispatcher::Dispatcher, types::Update};
+use crate::dispatcher::Dispatcher;
 
 // ────────────────────────────────────────────────
 // WebhookServer
@@ -108,7 +108,7 @@ impl WebhookServer {
     ///
     /// This function runs forever (or until the process exits).
     ///
-    /// In production, put a TLS-terminating reverse proxy (nginx, Caddy, …) in
+    /// For public webhook deployments, put a TLS-terminating reverse proxy (nginx, Caddy, ...) in
     /// front of this and expose it on port 443 as required by the Max API.
     pub async fn serve(self, addr: impl Into<String>) {
         let addr: SocketAddr = addr
@@ -164,8 +164,9 @@ async fn handle_update(
         }
     }
 
-    // 2. Parse the single Update object from the request body.
-    let update: Update = match serde_json::from_slice(&body) {
+    // 2. Parse the single update object as raw JSON first so unknown future
+    //    update types can still be observed by raw handlers.
+    let update: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(u) => u,
         Err(e) => {
             error!("Failed to parse webhook update: {e}");
@@ -175,7 +176,7 @@ async fn handle_update(
     };
 
     // 3. Dispatch — must not block longer than 30 s (Max's timeout).
-    state.dispatcher.dispatch(update).await;
+    state.dispatcher.dispatch_raw(update).await;
 
     StatusCode::OK
 }

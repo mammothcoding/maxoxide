@@ -15,11 +15,11 @@ Readme на разных языках:
 ## Возможности
 
 - ✅ Покрытие опубликованного REST API Max
-- ✅ Long polling (для разработки) и **Webhook** через [axum](https://github.com/tokio-rs/axum) (для продакшена)
-- ✅ Типизированные события (`Update`, `Message`, `Callback`, …)
-- ✅ `Dispatcher` с регистрацией хендлеров и фильтрами
-- ✅ Inline-клавиатура (все документированные типы кнопок: `callback`, `link`, `message`, `request_contact`, `request_geo_location`)
-- ✅ Загрузка файлов — multipart, правильный порядок токенов для видео/аудио
+- ✅ Long polling и опциональный **Webhook**-сервер на [axum](https://github.com/tokio-rs/axum)
+- ✅ Типизированные события с fallback для неизвестных обновлений (`Update`, `Message`, `Callback`)
+- ✅ `Dispatcher` с регистрацией хендлеров, составными фильтрами, startup hooks и периодическими задачами
+- ✅ Inline-клавиатура (`callback`, `link`, `message`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ Загрузка файлов — multipart, `photos` payload для image, правильный порядок токенов для видео/аудио, helpers для image/video/audio/file
 - ✅ Форматирование Markdown / HTML
 - ✅ Верификация Webhook-секрета (`X-Max-Bot-Api-Secret`)
 - ✅ Полностью async на Tokio
@@ -28,11 +28,11 @@ Readme на разных языках:
 
 ```toml
 [dependencies]
-maxoxide = "1.0.0"
+maxoxide = "2.0.0"
 tokio    = { version = "1", features = ["full"] }
 
-# Для поддержки Webhook (продакшен):
-# maxoxide = { version = "1.0.0", features = ["webhook"] }
+# Включить встроенный webhook-сервер на axum:
+# maxoxide = { version = "2.0.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -82,24 +82,34 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.send_markdown_to_user(user_id, text)` | Отправить Markdown пользователю по глобальному MAX `user_id` |
 | `bot.send_message_to_chat(chat_id, body)` | Отправить сообщение с вложениями / кнопками по `chat_id` |
 | `bot.send_message_to_user(user_id, body)` | Отправить сообщение с вложениями / кнопками по глобальному MAX `user_id` |
+| `bot.send_message_to_chat_with_options(chat_id, body, options)` | Отправить с query-настройками, например `disable_link_preview` |
 | `bot.edit_message(mid, body)` | Редактировать сообщение |
 | `bot.delete_message(mid)` | Удалить сообщение |
+| `bot.get_messages_by_ids(ids, …)` | Получить одно или несколько сообщений по ID |
+| `bot.get_video(video_token)` | Получить metadata и URL воспроизведения видео |
 | `bot.answer_callback(body)` | Ответ на нажатие кнопки |
 | `bot.get_chat(chat_id)` | Информация о чате |
 | `bot.get_chats(…)` | Список групповых чатов |
 | `bot.edit_chat(chat_id, body)` | Изменить название / описание чата |
 | `bot.leave_chat(chat_id)` | Выйти из чата |
 | `bot.get_members(…)` | Участники чата |
+| `bot.get_members_by_ids(chat_id, user_ids)` | Получить выбранных участников |
 | `bot.add_members(…)` | Добавить участников |
 | `bot.remove_member(…)` | Удалить участника |
 | `bot.get_admins(chat_id)` | Администраторы |
+| `bot.add_admins(chat_id, admins)` | Выдать права администратора |
+| `bot.remove_admin(chat_id, user_id)` | Снять права администратора |
 | `bot.pin_message(…)` | Закрепить сообщение |
 | `bot.unpin_message(…)` | Открепить |
-| `bot.send_action(chat_id, "typing_on")` | Запрос индикатора набора; API-вызов работает, но видимость в клиенте не подтверждена live-тестами MAX |
+| `bot.send_sender_action(chat_id, action)` | Отправить типизированное действие бота |
 | `bot.subscribe(body)` | Подписаться на Webhook |
 | `bot.get_upload_url(type)` | Получить URL загрузки |
 | `bot.upload_file(type, path, name, mime)` | Загрузить файл (двухшаговый процесс) |
 | `bot.upload_bytes(type, bytes, name, mime)` | То же, из байтов |
+| `bot.send_image_to_chat(...)` | Загрузить и отправить изображение |
+| `bot.send_video_to_chat(...)` | Загрузить и отправить видео |
+| `bot.send_audio_to_chat(...)` | Загрузить и отправить аудио |
+| `bot.send_file_to_chat(...)` | Загрузить и отправить обычный файл |
 | `bot.set_my_commands(commands)` | Экспериментально: публичный MAX API сейчас отвечает `404` на `/me/commands` |
 
 ## user_id и chat_id
@@ -114,11 +124,11 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 
 ## Известные ограничения MAX
 
-На 25 марта 2026 года библиотека умеет отправлять эти запросы, но live-поведение на стороне MAX пока расходится с ожиданиями:
+На 27 апреля 2026 года библиотека умеет отправлять эти запросы, но live-поведение на стороне MAX пока расходится с ожиданиями:
 
 - `Button::RequestContact` задокументирована в MAX, но в live-тестах приходило contact-вложение с пустыми `contact_id` и `vcf_phone`. Кнопка отправляется корректно, но возврат номера телефона пользователя на стороне MAX пока не подтверждён.
-- `Button::RequestGeoLocation` задокументирована в MAX, и мобильный клиент показывает отправленную карточку геопозиции, но в live long polling бот не получил соответствующее обновление. Сквозная доставка на стороне MAX пока не подтверждена.
-- `bot.send_action(chat_id, "typing_on")` получает успешный ответ API, но live-тесты MAX не подтвердили видимый индикатор набора текста в клиенте.
+- `Button::RequestGeoLocation` доставляет структурированное `Attachment::Location` с `latitude` и `longitude`; в клиенте та же отправленная позиция может отображаться как карточка Яндекс Карт.
+- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` получает успешный ответ API, но live-тесты MAX не подтвердили видимый индикатор набора текста в клиенте.
 - `bot.set_my_commands` оставлен как экспериментальный helper, но в публичной REST-документации MAX нет write-эндпоинта для команд бота, а live-запросы `POST /me/commands` возвращают `404 Path /me/commands is not recognized`.
 
 ## Фильтры диспетчера
@@ -130,6 +140,13 @@ dp.on_edited_message(handler);                // редактирование
 dp.on_callback(handler);                      // любой callback
 dp.on_callback_payload("btn:ok", handler);    // конкретный payload
 dp.on_bot_started(handler);                   // первый запуск бота
+dp.on_update(
+    Filter::message() & Filter::chat(chat_id) & Filter::text_contains("ping"),
+    handler,
+);                                            // составные фильтры
+dp.on_start(handler);                         // перед стартом polling
+dp.task(Duration::from_secs(60), handler);    // периодическая задача
+dp.on_raw_update(handler);                    // raw JSON каждого update
 dp.on_filter(|u| { … }, handler);             // кастомный предикат
 dp.on(handler);                               // все обновления
 ```
@@ -155,12 +172,27 @@ let body = NewMessageBody::text("Вы уверены?").with_keyboard(keyboard);
 bot.send_message_to_chat(chat_id, body).await?;
 ```
 
+Clipboard-кнопка копирует свой `payload` в клиенте MAX. Она не отправляет
+callback update боту:
+
+```rust
+let keyboard = KeyboardPayload {
+    buttons: vec![vec![Button::clipboard(
+        "Скопировать код",
+        "MAXOXIDE-2026",
+    )]],
+};
+
+let body = NewMessageBody::empty().with_keyboard(keyboard);
+bot.send_message_to_chat(chat_id, body).await?;
+```
+
 ## Загрузка файлов
 
 Max использует двухшаговый процесс загрузки. `upload_file` / `upload_bytes` делают его автоматически:
 
 ```rust
-use maxoxide::types::{NewAttachment, NewMessageBody, UploadType, UploadedToken};
+use maxoxide::types::{NewAttachment, NewMessageBody, UploadType};
 
 let token = bot
     .upload_file(UploadType::Image, "./photo.jpg", "photo.jpg", "image/jpeg")
@@ -168,9 +200,7 @@ let token = bot
 
 let body = NewMessageBody {
     text: Some("Вот фото!".into()),
-    attachments: Some(vec![NewAttachment::Image {
-        payload: UploadedToken { token },
-    }]),
+    attachments: Some(vec![NewAttachment::image(token)]),
     ..Default::default()
 };
 bot.send_message_to_chat(chat_id, body).await?;
@@ -180,7 +210,20 @@ bot.send_message_to_chat(chat_id, body).await?;
 
 > **Важно:** тип `photo` удалён из API Max. Всегда используйте `UploadType::Image`.
 
-> **Для видео и аудио:** токен выдаётся на первом шаге (`POST /uploads`), а не из ответа загрузки — библиотека учитывает это автоматически.
+Для частых случаев есть helpers, которые сразу загружают и отправляют файл:
+
+```rust
+bot.send_image_to_chat(chat_id, "./photo.jpg", "photo.jpg", "image/jpeg", None).await?;
+bot.send_video_to_chat(chat_id, "./clip.mp4", "clip.mp4", "video/mp4", None).await?;
+bot.send_audio_to_chat(chat_id, "./track.mp3", "track.mp3", "audio/mpeg", None).await?;
+bot.send_file_to_chat(chat_id, "./report.pdf", "report.pdf", "application/pdf", None).await?;
+```
+
+Есть такие же `*_to_user` и `*_bytes_*` helpers.
+
+После успешного upload MAX может ещё несколько секунд обрабатывать вложение. Helpers загрузки и отправки коротко ретраят отправку, если API отвечает, что вложение ещё не обработано.
+
+Image upload может вернуть MAX `photos` token map вместо одного `token`. Helpers `send_image_*` автоматически сохраняют и отправляют этот payload.
 
 ## Webhook-сервер (`features = ["webhook"]`)
 
@@ -204,6 +247,8 @@ WebhookServer::new(dp)
     .await;
 ```
 
+Используйте webhook, когда у бота есть публичный HTTPS endpoint и вы хотите, чтобы MAX доставлял обновления входящими запросами. Для локальной разработки и простых запусков обычно достаточно long polling.
+
 > Max требует HTTPS на порту 443. Самоподписанные сертификаты **не поддерживаются**.
 
 ## Структура проекта
@@ -219,12 +264,13 @@ maxoxide/
 │   ├── errors.rs       — MaxError
 │   ├── webhook.rs      — axum webhook-сервер (feature = "webhook")
 │   ├── tests.rs        — юнит-тесты
-│   └── types/
-│       └── mod.rs      — все типы (User, Chat, Message, Update, …)
+│   └── types.rs        — все типы (User, Chat, Message, Update, …)
 └── examples/
     ├── echo_bot.rs
+    ├── dispatcher_filters_bot.rs
     ├── keyboard_bot.rs
     ├── live_api_test.rs
+    ├── media_bot.rs
     └── webhook_bot.rs  (feature = "webhook")
 ```
 
@@ -248,6 +294,7 @@ cargo run --example live_api_test
 - URL бота для тестера
 - необязательные webhook URL и secret
 - необязательный путь к локальному файлу для `upload_file`
+- необязательные пути к изображению, видео и аудио для проверки media helpers
 - HTTP timeout, polling timeout и задержку между запросами
 
 Дальше harness пошагово ведёт тестера по действиям в клиенте Max и фиксирует `PASS` / `FAIL` / `SKIP` по реальным API-вызовам. Он заранее очищает backlog long polling, ставит небольшие паузы между запросами и требует явного подтверждения перед разрушительными или неоткатываемыми шагами, например:
@@ -256,6 +303,8 @@ cargo run --example live_api_test
 - `delete_chat`
 - `leave_chat`
 - видимое изменение title у группы
+
+Текущий прогон также проверяет неясное поведение MAX вокруг кнопок запроса контакта/геопозиции, message-кнопок, `open_app`, `clipboard`, sender actions, metadata загруженного видео, выборочного получения участников и временного изменения admin-прав.
 
 ## Лицензия
 

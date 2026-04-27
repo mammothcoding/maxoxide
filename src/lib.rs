@@ -75,6 +75,8 @@ mod tests;
 
 // Re-export the most commonly used items at the crate root.
 pub use bot::Bot;
-pub use dispatcher::{Context, Dispatcher, Filter};
+pub use dispatcher::{
+    Context, Dispatcher, Filter, RawUpdateContext, ScheduledTaskContext, StartContext,
+};
 pub use errors::{MaxError, Result};
 pub use reqwest;

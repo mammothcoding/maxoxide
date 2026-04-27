@@ -4,9 +4,9 @@
 //!   cargo run --example live_api_test
 
 use maxoxide::types::{
-    AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatType, EditChatBody,
-    KeyboardPayload, NewAttachment, NewMessageBody, PinMessageBody, SubscribeBody, Update,
-    UploadType, UploadedToken,
+    AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatAdmin, ChatAdminPermission,
+    ChatType, EditChatBody, KeyboardPayload, Message, NewAttachment, NewMessageBody,
+    PinMessageBody, SendMessageOptions, SenderAction, SubscribeBody, Update, UploadType,
 };
 use maxoxide::{Bot, reqwest::Client};
 use std::error::Error;
@@ -22,6 +22,7 @@ const PRIVATE_WAIT_SECS: u64 = 180;
 const GROUP_WAIT_SECS: u64 = 240;
 const MANUAL_WAIT_SECS: u64 = 120;
 const WAIT_PROMPT_CHUNK_SECS: u64 = 15;
+const MAX_NON_MATCHING_UPDATE_LOGS: usize = 5;
 
 #[derive(Clone, Copy)]
 enum Language {
@@ -139,6 +140,16 @@ async fn main() -> AnyResult<()> {
         }
     }
 
+    let raw_marker = harness.marker;
+    let raw_response = harness
+        .api_case(&mut report, "bot.get_updates_raw", move |bot| async move {
+            bot.get_updates_raw(raw_marker, Some(1), Some(1)).await
+        })
+        .await;
+    if let Some(marker) = raw_response.and_then(|response| response.marker) {
+        harness.marker = Some(marker);
+    }
+
     let private_phase = run_private_phase(&mut harness, &mut report, &config).await?;
     run_upload_phase(
         &mut harness,
@@ -224,12 +235,18 @@ async fn run_private_phase(
                 "bot.send_markdown_to_user",
                 "bot.send_message_to_chat(text_body)",
                 "bot.send_message_to_user(text_body)",
+                "bot.send_message_to_chat_with_options(disable_link_preview)",
                 "bot.send_action",
                 "bot.send_message_to_chat(keyboard)",
+                "bot.send_message_to_chat(open_app_button)",
+                "manual.observe_open_app_button",
+                "bot.send_message_to_chat(clipboard_button)",
+                "manual.observe_clipboard_button",
                 "bot.answer_callback",
                 "bot.edit_message",
                 "bot.get_message",
                 "bot.get_messages",
+                "bot.get_messages_by_ids",
                 "bot.delete_message",
             ],
             tr(
@@ -346,6 +363,21 @@ async fn run_private_phase(
         );
     }
 
+    let _ = harness
+        .api_case(
+            report,
+            "bot.send_message_to_chat_with_options(disable_link_preview)",
+            move |bot| async move {
+                bot.send_message_to_chat_with_options(
+                    private_chat_id,
+                    NewMessageBody::text("https://max.ru"),
+                    SendMessageOptions::disable_link_preview(true),
+                )
+                .await
+            },
+        )
+        .await;
+
     let callback_button_text = tr(lang, "Confirm callback", "Подтвердить callback");
     let message_button_text = tr(lang, "live:message_button", "live:message_button_ru");
     let contact_button_text = tr(lang, "Share contact", "Поделиться контактом");
@@ -401,6 +433,138 @@ async fn run_private_phase(
                 "Видна ли в отправленной клавиатуре кнопка-ссылка?",
             ),
         )?;
+
+        if let Some(web_app) = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Optional platform probe: enter open_app web_app value, or leave blank to skip",
+                "Опциональная platform-проверка: введите значение web_app для open_app или оставьте поле пустым",
+            ),
+        )? {
+            let payload = prompt_optional(
+                lang,
+                tr(
+                    lang,
+                    "Optional open_app payload string",
+                    "Необязательная строка payload для open_app",
+                ),
+            )?;
+            let contact_id = prompt_optional_i64(
+                lang,
+                tr(
+                    lang,
+                    "Optional open_app contact_id",
+                    "Необязательный contact_id для open_app",
+                ),
+            )?;
+            let open_app_keyboard = KeyboardPayload {
+                buttons: vec![vec![Button::open_app_full(
+                    tr(lang, "Open app", "Открыть app"),
+                    web_app,
+                    payload,
+                    contact_id,
+                )]],
+            };
+            let open_app_body = NewMessageBody::text(tr(
+                lang,
+                "MAX platform probe: open_app button.",
+                "Проверка платформы MAX: open_app-кнопка.",
+            ))
+            .with_keyboard(open_app_keyboard);
+            let open_app_message = harness
+                .api_case(
+                    report,
+                    "bot.send_message_to_chat(open_app_button)",
+                    move |bot| async move {
+                        bot.send_message_to_chat(private_chat_id, open_app_body)
+                            .await
+                    },
+                )
+                .await;
+
+            if open_app_message.is_some() {
+                confirm_case(
+                    lang,
+                    report,
+                    "manual.observe_open_app_button",
+                    tr(
+                        lang,
+                        "Is the open_app button visible, and does tapping it open a MAX app or show a client error?",
+                        "Видна ли open_app-кнопка, и открывает ли нажатие MAX app или показывает ошибку клиента?",
+                    ),
+                )?;
+            } else {
+                report.skip(
+                    "manual.observe_open_app_button",
+                    tr(
+                        lang,
+                        "open_app button message was not sent",
+                        "сообщение с open_app-кнопкой не было отправлено",
+                    ),
+                );
+            }
+        } else {
+            report.skip(
+                "bot.send_message_to_chat(open_app_button)",
+                tr(
+                    lang,
+                    "tester did not provide open_app web_app",
+                    "тестер не указал web_app для open_app",
+                ),
+            );
+            report.skip(
+                "manual.observe_open_app_button",
+                tr(
+                    lang,
+                    "tester did not provide open_app web_app",
+                    "тестер не указал web_app для open_app",
+                ),
+            );
+        }
+
+        let clipboard_body = NewMessageBody::text(tr(
+            lang,
+            "MAX platform probe: clipboard button.",
+            "Проверка платформы MAX: clipboard-кнопка.",
+        ))
+        .with_keyboard(KeyboardPayload {
+            buttons: vec![vec![Button::clipboard(
+                tr(lang, "Copy text", "Скопировать текст"),
+                "maxoxide-live-clipboard-payload",
+            )]],
+        });
+        let clipboard_message = harness
+            .api_case(
+                report,
+                "bot.send_message_to_chat(clipboard_button)",
+                move |bot| async move {
+                    bot.send_message_to_chat(private_chat_id, clipboard_body)
+                        .await
+                },
+            )
+            .await;
+        if clipboard_message.is_some() {
+            confirm_case(
+                lang,
+                report,
+                "manual.observe_clipboard_button",
+                tr(
+                    lang,
+                    "Is the clipboard button visible, and does tapping it copy the expected text?",
+                    "Видна ли clipboard-кнопка, и копирует ли нажатие ожидаемый текст?",
+                ),
+            )?;
+        } else {
+            report.skip(
+                "manual.observe_clipboard_button",
+                tr(
+                    lang,
+                    "clipboard button message was not sent",
+                    "сообщение с clipboard-кнопкой не было отправлено",
+                ),
+            );
+        }
 
         if confirm(
             lang,
@@ -546,12 +710,12 @@ async fn run_private_phase(
                         },
                     );
                 } else {
-                    report.fail(
+                    report.skip(
                         "manual.contact_phone_present",
                         tr(
                             lang,
-                            "contact attachment was received, but vcf_phone is empty",
-                            "contact-вложение пришло, но поле vcf_phone пустое",
+                            "contact attachment was received, but vcf_phone is empty; treating this as a current MAX platform gap",
+                            "contact-вложение пришло, но поле vcf_phone пустое; шаг помечен как текущее платформенное ограничение MAX",
                         ),
                     );
                 }
@@ -588,12 +752,12 @@ async fn run_private_phase(
             lang,
             tr(
                 lang,
-                "Test request-location button now? Type `y` to wait for shared location, anything else to skip.",
-                "Проверить кнопку запроса геопозиции сейчас? Введите `y`, чтобы ждать отправку геопозиции, иначе шаг будет пропущен.",
+                "Test request-location button now? Type `y` to wait for shared location or a client map-card fallback, anything else to skip.",
+                "Проверить кнопку запроса геопозиции сейчас? Введите `y`, чтобы ждать геопозицию или fallback-карточку карты, иначе шаг будет пропущен.",
             ),
             false,
         )? {
-            let _ = harness
+            let location_update = harness
                 .wait_case(
                     report,
                     "manual.location_share",
@@ -606,15 +770,71 @@ async fn run_private_phase(
                     |update| match update {
                         Update::MessageCreated { message, .. } => {
                             message.chat_id() == private_chat_id
-                                && message_has_attachment(&message.body.attachments, is_location)
+                                && (message_has_attachment(&message.body.attachments, is_location)
+                                    || looks_like_client_map_card(message))
                         }
                         _ => false,
                     },
                 )
                 .await;
+
+            match location_update {
+                Some(Update::MessageCreated { message, .. })
+                    if message_has_attachment(&message.body.attachments, is_location) =>
+                {
+                    report.pass(
+                        "manual.location_structured_payload",
+                        tr(
+                            lang,
+                            "structured location attachment received",
+                            "получено структурированное location-вложение",
+                        ),
+                    );
+                }
+                Some(Update::MessageCreated { message, .. })
+                    if looks_like_client_map_card(&message) =>
+                {
+                    report.skip(
+                        "manual.location_structured_payload",
+                        tr(
+                            lang,
+                            "MAX client sent a map link/card instead of a structured location attachment",
+                            "клиент MAX отправил ссылку/карточку карты вместо структурированного location-вложения",
+                        ),
+                    );
+                }
+                Some(_) => {
+                    report.skip(
+                        "manual.location_structured_payload",
+                        tr(
+                            lang,
+                            "location step completed with an unexpected update shape",
+                            "шаг геопозиции завершился неожиданной формой update",
+                        ),
+                    );
+                }
+                None => {
+                    report.skip(
+                        "manual.location_structured_payload",
+                        tr(
+                            lang,
+                            "location share step did not complete",
+                            "шаг отправки геопозиции не был завершён",
+                        ),
+                    );
+                }
+            }
         } else {
             report.skip(
                 "manual.location_share",
+                tr(
+                    lang,
+                    "tester skipped location share",
+                    "тестер пропустил отправку геопозиции",
+                ),
+            );
+            report.skip(
+                "manual.location_structured_payload",
                 tr(
                     lang,
                     "tester skipped location share",
@@ -842,6 +1062,14 @@ async fn run_private_phase(
 
         let message_id = plain_message.message_id().to_string();
         let _ = harness
+            .api_case(report, "bot.get_messages_by_ids", move |bot| async move {
+                bot.get_messages_by_ids([message_id], Some(1), None, None)
+                    .await
+            })
+            .await;
+
+        let message_id = plain_message.message_id().to_string();
+        let _ = harness
             .api_case(report, "bot.delete_message", move |bot| async move {
                 bot.delete_message(&message_id).await
             })
@@ -853,6 +1081,7 @@ async fn run_private_phase(
                 "bot.edit_message",
                 "bot.get_message",
                 "bot.get_messages",
+                "bot.get_messages_by_ids",
                 "bot.delete_message",
             ],
             tr(
@@ -900,9 +1129,10 @@ async fn run_upload_phase(
         Language::Russian => println!("Файл-источник для загрузки: {}", upload_path.display()),
     }
 
+    let upload_path_for_upload_file = upload_path.clone();
     let upload_file_token = harness
         .api_case(report, "bot.upload_file", move |bot| {
-            let upload_path = upload_path.clone();
+            let upload_path = upload_path_for_upload_file.clone();
             async move {
                 bot.upload_file(
                     UploadType::File,
@@ -932,9 +1162,7 @@ async fn run_upload_phase(
         if let Some(token) = upload_file_token {
             let body = NewMessageBody {
                 text: Some("File attachment sent via upload_file.".into()),
-                attachments: Some(vec![NewAttachment::File {
-                    payload: UploadedToken { token },
-                }]),
+                attachments: Some(vec![NewAttachment::file(token)]),
                 ..Default::default()
             };
             let _ = harness
@@ -954,9 +1182,53 @@ async fn run_upload_phase(
                 ),
             );
         }
+
+        let helper_path = upload_path.clone();
+        let helper_filename = filename_from_path(&helper_path, "maxoxide-live-upload.txt");
+        let helper_mime = mime_for_path(&helper_path, "application/octet-stream");
+        let _ = harness
+            .api_case(report, "bot.send_file_to_chat", move |bot| {
+                let helper_path = helper_path.clone();
+                let helper_filename = helper_filename.clone();
+                let helper_mime = helper_mime.clone();
+                async move {
+                    bot.send_file_to_chat(
+                        chat_id,
+                        helper_path,
+                        helper_filename,
+                        helper_mime,
+                        Some("File sent via send_file_to_chat.".into()),
+                    )
+                    .await
+                }
+            })
+            .await;
+
+        let bytes_payload = b"maxoxide live send_file_bytes_to_chat payload\n".to_vec();
+        let _ = harness
+            .api_case(
+                report,
+                "bot.send_file_bytes_to_chat",
+                move |bot| async move {
+                    bot.send_file_bytes_to_chat(
+                        chat_id,
+                        bytes_payload,
+                        "maxoxide-live-bytes-helper.txt",
+                        "text/plain",
+                        Some("File sent via send_file_bytes_to_chat.".into()),
+                    )
+                    .await
+                },
+            )
+            .await;
     } else {
-        report.skip(
-            "bot.send_message_to_chat(upload_file_attachment)",
+        skip_cases(
+            report,
+            &[
+                "bot.send_message_to_chat(upload_file_attachment)",
+                "bot.send_file_to_chat",
+                "bot.send_file_bytes_to_chat",
+            ],
             tr(
                 lang,
                 "private chat is not available",
@@ -969,9 +1241,7 @@ async fn run_upload_phase(
         if let Some(token) = upload_bytes_token {
             let body = NewMessageBody {
                 text: Some("File attachment sent via upload_bytes to user_id.".into()),
-                attachments: Some(vec![NewAttachment::File {
-                    payload: UploadedToken { token },
-                }]),
+                attachments: Some(vec![NewAttachment::file(token)]),
                 ..Default::default()
             };
             let _ = harness
@@ -991,13 +1261,205 @@ async fn run_upload_phase(
                 ),
             );
         }
+
+        let helper_path = upload_path.clone();
+        let helper_filename = filename_from_path(&helper_path, "maxoxide-live-upload.txt");
+        let helper_mime = mime_for_path(&helper_path, "application/octet-stream");
+        let _ = harness
+            .api_case(report, "bot.send_file_to_user", move |bot| {
+                let helper_path = helper_path.clone();
+                let helper_filename = helper_filename.clone();
+                let helper_mime = helper_mime.clone();
+                async move {
+                    bot.send_file_to_user(
+                        user_id,
+                        helper_path,
+                        helper_filename,
+                        helper_mime,
+                        Some("File sent via send_file_to_user.".into()),
+                    )
+                    .await
+                }
+            })
+            .await;
+
+        let bytes_payload = b"maxoxide live send_file_bytes_to_user payload\n".to_vec();
+        let _ = harness
+            .api_case(
+                report,
+                "bot.send_file_bytes_to_user",
+                move |bot| async move {
+                    bot.send_file_bytes_to_user(
+                        user_id,
+                        bytes_payload,
+                        "maxoxide-live-bytes-helper.txt",
+                        "text/plain",
+                        Some("File sent via send_file_bytes_to_user.".into()),
+                    )
+                    .await
+                },
+            )
+            .await;
     } else {
-        report.skip(
-            "bot.send_message_to_user(upload_bytes_attachment)",
+        skip_cases(
+            report,
+            &[
+                "bot.send_message_to_user(upload_bytes_attachment)",
+                "bot.send_file_to_user",
+                "bot.send_file_bytes_to_user",
+            ],
             tr(
                 lang,
                 "private user_id is not available",
                 "private user_id недоступен",
+            ),
+        );
+    }
+
+    if let Some(chat_id) = private_chat_id {
+        if let Some(image_path) = config.upload_image_path.clone() {
+            let filename = filename_from_path(&image_path, "maxoxide-live-image");
+            let mime = mime_for_path(&image_path, "image/jpeg");
+            let _ = harness
+                .api_case(report, "bot.send_image_to_chat", move |bot| {
+                    let image_path = image_path.clone();
+                    let filename = filename.clone();
+                    let mime = mime.clone();
+                    async move {
+                        bot.send_image_to_chat(
+                            chat_id,
+                            image_path,
+                            filename,
+                            mime,
+                            Some("Image sent via send_image_to_chat.".into()),
+                        )
+                        .await
+                    }
+                })
+                .await;
+        } else {
+            report.skip(
+                "bot.send_image_to_chat",
+                tr(
+                    lang,
+                    "image path was not provided",
+                    "путь к изображению не был указан",
+                ),
+            );
+        }
+
+        if let Some(video_path) = config.upload_video_path.clone() {
+            let filename = filename_from_path(&video_path, "maxoxide-live-video");
+            let mime = mime_for_path(&video_path, "video/mp4");
+            let video_message = harness
+                .api_case(report, "bot.send_video_to_chat", move |bot| {
+                    let video_path = video_path.clone();
+                    let filename = filename.clone();
+                    let mime = mime.clone();
+                    async move {
+                        bot.send_video_to_chat(
+                            chat_id,
+                            video_path,
+                            filename,
+                            mime,
+                            Some("Video sent via send_video_to_chat.".into()),
+                        )
+                        .await
+                    }
+                })
+                .await;
+
+            if let Some(video_message) = video_message {
+                if let Some(video_token) = extract_video_token(&video_message) {
+                    let _ = harness
+                        .api_case(
+                            report,
+                            "bot.get_video(uploaded_video)",
+                            move |bot| async move { bot.get_video(&video_token).await },
+                        )
+                        .await;
+                } else {
+                    report.fail(
+                        "bot.get_video(uploaded_video)",
+                        tr(
+                            lang,
+                            "sent video message did not contain a video token",
+                            "отправленное видео-сообщение не содержит video token",
+                        ),
+                    );
+                }
+            } else {
+                report.skip(
+                    "bot.get_video(uploaded_video)",
+                    tr(
+                        lang,
+                        "send_video_to_chat did not succeed",
+                        "send_video_to_chat не завершился успешно",
+                    ),
+                );
+            }
+        } else {
+            report.skip(
+                "bot.send_video_to_chat",
+                tr(
+                    lang,
+                    "video path was not provided",
+                    "путь к видео не был указан",
+                ),
+            );
+            report.skip(
+                "bot.get_video(uploaded_video)",
+                tr(
+                    lang,
+                    "video path was not provided",
+                    "путь к видео не был указан",
+                ),
+            );
+        }
+
+        if let Some(audio_path) = config.upload_audio_path.clone() {
+            let filename = filename_from_path(&audio_path, "maxoxide-live-audio");
+            let mime = mime_for_path(&audio_path, "audio/mpeg");
+            let _ = harness
+                .api_case(report, "bot.send_audio_to_chat", move |bot| {
+                    let audio_path = audio_path.clone();
+                    let filename = filename.clone();
+                    let mime = mime.clone();
+                    async move {
+                        bot.send_audio_to_chat(
+                            chat_id,
+                            audio_path,
+                            filename,
+                            mime,
+                            Some("Audio sent via send_audio_to_chat.".into()),
+                        )
+                        .await
+                    }
+                })
+                .await;
+        } else {
+            report.skip(
+                "bot.send_audio_to_chat",
+                tr(
+                    lang,
+                    "audio path was not provided",
+                    "путь к аудиофайлу не был указан",
+                ),
+            );
+        }
+    } else {
+        skip_cases(
+            report,
+            &[
+                "bot.send_image_to_chat",
+                "bot.send_video_to_chat",
+                "bot.get_video(uploaded_video)",
+                "bot.send_audio_to_chat",
+            ],
+            tr(
+                lang,
+                "private chat is not available",
+                "личный чат недоступен",
             ),
         );
     }
@@ -1148,9 +1610,15 @@ async fn run_group_phase(
                 "manual.group_activation",
                 "bot.get_chat(group)",
                 "bot.get_members",
+                "bot.get_members_by_ids",
                 "bot.get_admins",
                 "bot.get_my_membership",
-                "bot.send_action",
+                "bot.send_sender_action(typing_on)",
+                "bot.send_sending_image",
+                "bot.send_sending_video",
+                "bot.send_sending_audio",
+                "bot.send_sending_file",
+                "bot.mark_seen",
                 "manual.observe_typing_indicator",
                 "bot.send_message_to_chat(group)",
                 "bot.pin_message",
@@ -1158,6 +1626,8 @@ async fn run_group_phase(
                 "bot.unpin_message",
                 "bot.edit_chat",
                 "bot.edit_chat(rollback)",
+                "bot.add_admins",
+                "bot.remove_admin",
                 "bot.add_members",
                 "bot.remove_member",
                 "bot.delete_chat",
@@ -1259,12 +1729,22 @@ async fn run_group_phase(
             &[
                 "bot.get_chat(group)",
                 "bot.get_members",
+                "bot.get_members_by_ids",
                 "bot.get_admins",
                 "bot.get_my_membership",
+                "bot.send_sender_action(typing_on)",
+                "bot.send_sending_image",
+                "bot.send_sending_video",
+                "bot.send_sending_audio",
+                "bot.send_sending_file",
+                "bot.mark_seen",
+                "manual.observe_typing_indicator",
                 "bot.pin_message",
                 "bot.get_pinned_message",
                 "bot.unpin_message",
                 "bot.edit_chat",
+                "bot.add_admins",
+                "bot.remove_admin",
                 "bot.add_members",
                 "bot.remove_member",
                 "bot.delete_chat",
@@ -1299,22 +1779,53 @@ async fn run_group_phase(
         print_chat_members(&members.members, lang);
     }
 
+    let selected_member_id = known_user_id.or_else(|| {
+        members
+            .as_ref()
+            .and_then(|members| members.members.first())
+            .map(|member| member.user_id)
+    });
+    if let Some(user_id) = selected_member_id {
+        let _ = harness
+            .api_case(report, "bot.get_members_by_ids", move |bot| async move {
+                bot.get_members_by_ids(group_chat_id, [user_id]).await
+            })
+            .await;
+    } else {
+        report.skip(
+            "bot.get_members_by_ids",
+            tr(
+                lang,
+                "no member user_id is available",
+                "нет доступного user_id участника",
+            ),
+        );
+    }
+
     let _ = harness
         .api_case(report, "bot.get_admins", move |bot| async move {
             bot.get_admins(group_chat_id).await
         })
         .await;
 
-    let _ = harness
+    let bot_membership = harness
         .api_case(report, "bot.get_my_membership", move |bot| async move {
             bot.get_my_membership(group_chat_id).await
         })
         .await;
+    if let Some(member) = bot_membership.as_ref() {
+        print_bot_membership(member, lang);
+    }
 
     if harness
-        .api_case(report, "bot.send_action", move |bot| async move {
-            bot.send_action(group_chat_id, "typing_on").await
-        })
+        .api_case(
+            report,
+            "bot.send_sender_action(typing_on)",
+            move |bot| async move {
+                bot.send_sender_action(group_chat_id, SenderAction::TypingOn)
+                    .await
+            },
+        )
         .await
         .is_some()
     {
@@ -1342,6 +1853,32 @@ async fn run_group_phase(
             );
         }
     }
+
+    let _ = harness
+        .api_case(report, "bot.send_sending_image", move |bot| async move {
+            bot.send_sending_image(group_chat_id).await
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.send_sending_video", move |bot| async move {
+            bot.send_sending_video(group_chat_id).await
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.send_sending_audio", move |bot| async move {
+            bot.send_sending_audio(group_chat_id).await
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.send_sending_file", move |bot| async move {
+            bot.send_sending_file(group_chat_id).await
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.mark_seen", move |bot| async move {
+            bot.mark_seen(group_chat_id).await
+        })
+        .await;
 
     let group_message = harness
         .api_case(
@@ -1491,6 +2028,103 @@ async fn run_group_phase(
         );
     }
 
+    let admin_user_id = prompt_optional_i64(
+        lang,
+        tr(
+            lang,
+            "Optional platform probe: enter a user_id for bot.add_admins/bot.remove_admin, or leave blank to skip",
+            "Опциональная platform-проверка: введите user_id для bot.add_admins/bot.remove_admin или оставьте поле пустым",
+        ),
+    )?;
+    if let Some(user_id) = admin_user_id {
+        if typed_confirmation(
+            tr(
+                lang,
+                "Type `ADMIN` to confirm temporary admin rights change for this user_id",
+                "Введите `ADMIN`, чтобы подтвердить временное изменение admin-прав для этого user_id",
+            ),
+            "ADMIN",
+        )? {
+            let bot_can_add_admins = member_can_add_admins(bot_membership.as_ref());
+            if !bot_can_add_admins {
+                skip_cases(
+                    report,
+                    &["bot.add_admins", "bot.remove_admin"],
+                    tr(
+                        lang,
+                        "bot membership does not include the add_admins permission",
+                        "в правах бота нет add_admins",
+                    ),
+                );
+            } else {
+                let permissions_to_grant = admin_probe_permissions(bot_membership.as_ref());
+                harness.pause().await;
+                print_case("bot.add_admins");
+                let bot = harness.bot.clone();
+                let add_admins_result = bot
+                    .add_admins(
+                        group_chat_id,
+                        vec![ChatAdmin {
+                            user_id,
+                            permissions: permissions_to_grant,
+                            alias: None,
+                        }],
+                    )
+                    .await;
+
+                let added = match add_admins_result {
+                    Ok(_) => {
+                        report.pass("bot.add_admins", tr(lang, "ok", "ok"));
+                        println!("   PASS");
+                        true
+                    }
+                    Err(err) => {
+                        report.fail("bot.add_admins", err.to_string());
+                        println!("   FAIL: {err}");
+                        false
+                    }
+                };
+
+                if added {
+                    let _ = harness
+                        .api_case(report, "bot.remove_admin", move |bot| async move {
+                            bot.remove_admin(group_chat_id, user_id).await
+                        })
+                        .await;
+                } else {
+                    report.skip(
+                        "bot.remove_admin",
+                        tr(
+                            lang,
+                            "bot.add_admins did not succeed",
+                            "bot.add_admins не завершился успешно",
+                        ),
+                    );
+                }
+            }
+        } else {
+            skip_cases(
+                report,
+                &["bot.add_admins", "bot.remove_admin"],
+                tr(
+                    lang,
+                    "tester did not confirm admin rights probe",
+                    "тестер не подтвердил проверку admin-прав",
+                ),
+            );
+        }
+    } else {
+        skip_cases(
+            report,
+            &["bot.add_admins", "bot.remove_admin"],
+            tr(
+                lang,
+                "tester did not provide a user_id",
+                "тестер не указал user_id",
+            ),
+        );
+    }
+
     let member_user_id = prompt_optional_i64(
         lang,
         tr(
@@ -1633,6 +2267,9 @@ struct Config {
     webhook_url: Option<String>,
     webhook_secret: Option<String>,
     upload_file_path: Option<PathBuf>,
+    upload_image_path: Option<PathBuf>,
+    upload_video_path: Option<PathBuf>,
+    upload_audio_path: Option<PathBuf>,
     request_delay: Duration,
     http_timeout: Duration,
     poll_timeout: u32,
@@ -1684,6 +2321,33 @@ impl Config {
             ),
         )?
         .map(PathBuf::from);
+        let upload_image_path = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Path to an image for send_image_to_chat (optional)",
+                "Путь к изображению для send_image_to_chat (необязательно)",
+            ),
+        )?
+        .map(PathBuf::from);
+        let upload_video_path = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Path to a video for send_video_to_chat/get_video (optional)",
+                "Путь к видео для send_video_to_chat/get_video (необязательно)",
+            ),
+        )?
+        .map(PathBuf::from);
+        let upload_audio_path = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Path to an audio file for send_audio_to_chat (optional)",
+                "Путь к аудиофайлу для send_audio_to_chat (необязательно)",
+            ),
+        )?
+        .map(PathBuf::from);
         let request_delay_ms = prompt_u64(
             lang,
             tr(
@@ -1715,6 +2379,9 @@ impl Config {
             webhook_url,
             webhook_secret,
             upload_file_path,
+            upload_image_path,
+            upload_video_path,
+            upload_audio_path,
             request_delay: Duration::from_millis(request_delay_ms),
             http_timeout: Duration::from_secs(http_timeout_secs.max(1)),
             poll_timeout: poll_timeout.max(1),
@@ -1868,6 +2535,7 @@ impl Harness {
         F: Fn(&Update) -> bool,
     {
         let started = Instant::now();
+        let mut logged_non_matching = 0usize;
         loop {
             if started.elapsed() >= timeout {
                 return Ok(None);
@@ -1889,6 +2557,29 @@ impl Harness {
             for update in response.updates {
                 if predicate(&update) {
                     return Ok(Some(update));
+                }
+
+                if logged_non_matching < MAX_NON_MATCHING_UPDATE_LOGS {
+                    println!(
+                        "   {}",
+                        tr(
+                            self.lang,
+                            "Observed a non-matching update while waiting:",
+                            "Получено неподходящее обновление во время ожидания:",
+                        )
+                    );
+                    print_update_details(self.lang, &update);
+                    logged_non_matching += 1;
+                } else if logged_non_matching == MAX_NON_MATCHING_UPDATE_LOGS {
+                    println!(
+                        "   {}",
+                        tr(
+                            self.lang,
+                            "Further non-matching updates are hidden for this wait chunk.",
+                            "Дальнейшие неподходящие обновления в этом интервале скрыты.",
+                        )
+                    );
+                    logged_non_matching += 1;
                 }
             }
         }
@@ -1997,6 +2688,38 @@ fn prepare_upload_file(path: Option<&Path>) -> AnyResult<PathBuf> {
     Ok(path)
 }
 
+fn filename_from_path(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn mime_for_path(path: &Path, fallback: &str) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("wav") => "audio/wav",
+        Some("ogg") => "audio/ogg",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        _ => fallback,
+    }
+    .to_string()
+}
+
 fn message_has_attachment<F>(attachments: &Option<Vec<Attachment>>, predicate: F) -> bool
 where
     F: Fn(&Attachment) -> bool,
@@ -2015,8 +2738,53 @@ fn is_location(attachment: &Attachment) -> bool {
     matches!(attachment, Attachment::Location { .. })
 }
 
+fn looks_like_client_map_card(message: &Message) -> bool {
+    let mut haystack = String::new();
+
+    if let Some(text) = message.text() {
+        haystack.push_str(text);
+        haystack.push('\n');
+    }
+
+    if let Some(url) = &message.url {
+        haystack.push_str(url);
+        haystack.push('\n');
+    }
+
+    if let Some(constructor) = &message.constructor {
+        haystack.push_str(&constructor.to_string());
+    }
+
+    if let Some(attachments) = &message.body.attachments {
+        for attachment in attachments {
+            if let Ok(json) = serde_json::to_string(attachment) {
+                haystack.push('\n');
+                haystack.push_str(&json);
+            }
+        }
+    }
+
+    let normalized = haystack.to_ascii_lowercase();
+    normalized.contains("yandex")
+        || normalized.contains("яндекс")
+        || normalized.contains("maps")
+        || normalized.contains("yandex.ru/maps")
+}
+
 fn is_non_keyboard_attachment(attachment: &Attachment) -> bool {
     !matches!(attachment, Attachment::InlineKeyboard { .. })
+}
+
+fn extract_video_token(message: &Message) -> Option<String> {
+    message
+        .body
+        .attachments
+        .as_ref()?
+        .iter()
+        .find_map(|attachment| match attachment {
+            Attachment::Video { payload } => payload.token.clone(),
+            _ => None,
+        })
 }
 
 fn upload_type_name(upload_type: &UploadType) -> &'static str {
@@ -2025,6 +2793,7 @@ fn upload_type_name(upload_type: &UploadType) -> &'static str {
         UploadType::Video => "video",
         UploadType::Audio => "audio",
         UploadType::File => "file",
+        _ => "unknown",
     }
 }
 
@@ -2032,6 +2801,50 @@ fn skip_cases(report: &mut Report, names: &[&str], reason: &str) {
     for name in names {
         report.skip(*name, reason);
     }
+}
+
+fn member_can_add_admins(member: Option<&maxoxide::types::ChatMember>) -> bool {
+    member
+        .map(|member| {
+            member.is_owner == Some(true)
+                || member
+                    .permissions
+                    .as_deref()
+                    .map(|permissions| permissions.contains(&ChatAdminPermission::AddAdmins))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+fn admin_probe_permissions(
+    member: Option<&maxoxide::types::ChatMember>,
+) -> Vec<ChatAdminPermission> {
+    let Some(member) = member else {
+        return vec![ChatAdminPermission::ReadAllMessages];
+    };
+
+    if member.is_owner == Some(true) {
+        return vec![ChatAdminPermission::ReadAllMessages];
+    }
+
+    let permissions = member.permissions.as_deref().unwrap_or(&[]);
+    for preferred in [
+        ChatAdminPermission::ReadAllMessages,
+        ChatAdminPermission::Write,
+        ChatAdminPermission::AddRemoveMembers,
+    ] {
+        if permissions.contains(&preferred) {
+            return vec![preferred];
+        }
+    }
+
+    permissions
+        .iter()
+        .find(|permission| **permission != ChatAdminPermission::AddAdmins)
+        .cloned()
+        .or_else(|| permissions.first().cloned())
+        .map(|permission| vec![permission])
+        .unwrap_or_else(|| vec![ChatAdminPermission::ReadAllMessages])
 }
 
 fn prompt_wait_decision(lang: Language) -> AnyResult<WaitDecision> {
@@ -2062,6 +2875,10 @@ fn prompt_wait_decision(lang: Language) -> AnyResult<WaitDecision> {
 }
 
 fn print_update_details(lang: Language, update: &Update) {
+    if let Some(update_type) = update.update_type() {
+        println!("   update_type: {update_type}");
+    }
+
     match update {
         Update::MessageCallback { callback, .. } => {
             println!("   callback_id: {}", callback.callback_id);
@@ -2075,16 +2892,60 @@ fn print_update_details(lang: Language, update: &Update) {
             }
         }
         Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
+            println!("   chat_id: {}", message.chat_id());
+            println!("   message_id: {}", message.message_id());
             if let Some(sender) = &message.sender {
                 println!("   {}: {}", tr(lang, "user_id", "user_id"), sender.user_id);
-                println!("   {}: {}", tr(lang, "sender", "отправитель"), sender.name);
+                println!(
+                    "   {}: {}",
+                    tr(lang, "sender", "отправитель"),
+                    sender.display_name()
+                );
             }
             if let Some(text) = message.text() {
                 println!("   {}: {text}", tr(lang, "text", "текст"));
             }
+            if let Some(url) = &message.url {
+                println!("   url: {url}");
+            }
+            if let Some(constructor) = &message.constructor {
+                println!("   constructor: {constructor}");
+            }
             if let Some(attachments) = &message.body.attachments {
                 for attachment in attachments {
+                    println!(
+                        "   {}: {}",
+                        tr(lang, "attachment", "вложение"),
+                        attachment_debug_name(attachment)
+                    );
                     match attachment {
+                        Attachment::Image { payload }
+                        | Attachment::Video { payload }
+                        | Attachment::Audio { payload } => {
+                            if let Some(url) = &payload.url {
+                                println!("   attachment_url: {url}");
+                            }
+                            if let Some(token) = &payload.token {
+                                println!("   attachment_token: {token}");
+                            }
+                            if let Some(photo_id) = payload.photo_id {
+                                println!("   photo_id: {photo_id}");
+                            }
+                        }
+                        Attachment::File { payload } => {
+                            if let Some(url) = &payload.url {
+                                println!("   attachment_url: {url}");
+                            }
+                            if let Some(token) = &payload.token {
+                                println!("   attachment_token: {token}");
+                            }
+                            if let Some(filename) = &payload.filename {
+                                println!("   filename: {filename}");
+                            }
+                            if let Some(size) = payload.size {
+                                println!("   size: {size}");
+                            }
+                        }
                         Attachment::Contact { payload } => {
                             println!(
                                 "   {}: {:?}",
@@ -2111,12 +2972,36 @@ fn print_update_details(lang: Language, update: &Update) {
                                 payload.longitude
                             );
                         }
+                        Attachment::Unknown { payload, raw, .. } => {
+                            if let Some(payload) = payload {
+                                println!("   attachment_payload: {payload}");
+                            }
+                            println!("   attachment_raw: {raw}");
+                        }
                         _ => {}
                     }
                 }
             }
         }
+        Update::Unknown { raw, .. } => {
+            println!("   raw_update: {raw}");
+        }
         _ => {}
+    }
+}
+
+fn attachment_debug_name(attachment: &Attachment) -> &str {
+    match attachment {
+        Attachment::Image { .. } => "image",
+        Attachment::Video { .. } => "video",
+        Attachment::Audio { .. } => "audio",
+        Attachment::File { .. } => "file",
+        Attachment::Sticker { .. } => "sticker",
+        Attachment::InlineKeyboard { .. } => "inline_keyboard",
+        Attachment::Location { .. } => "location",
+        Attachment::Contact { .. } => "contact",
+        Attachment::Unknown { r#type, .. } => r#type.as_str(),
+        _ => "unknown",
     }
 }
 
@@ -2147,6 +3032,8 @@ fn extract_sender_user_id(update: &Update) -> Option<i64> {
         | Update::UserRemoved { user, .. }
         | Update::ChatTitleChanged { user, .. } => Some(user.user_id),
         Update::MessageRemoved { user_id, .. } => Some(*user_id),
+        Update::Unknown { .. } => None,
+        _ => None,
     }
 }
 
@@ -2333,14 +3220,65 @@ fn print_chat_members(members: &[maxoxide::types::ChatMember], lang: Language) {
     );
 
     for member in members {
-        println!("  - {} {}", member.user_id, member.name);
+        let last_name = member.last_name.as_deref().unwrap_or("");
+        let role = member_role(member, lang);
+        let permissions = permission_list(member.permissions.as_deref(), lang);
+        println!(
+            "  - {} {} {} [{}] permissions={}",
+            member.user_id, member.first_name, last_name, role, permissions
+        );
     }
 }
 
-fn chat_type_name(chat_type: &ChatType) -> &'static str {
+fn print_bot_membership(member: &maxoxide::types::ChatMember, lang: Language) {
+    println!(
+        "{}",
+        tr(
+            lang,
+            "Current bot membership returned by bot.get_my_membership:",
+            "Текущее членство бота из bot.get_my_membership:",
+        )
+    );
+    println!(
+        "  - user_id={} role={} permissions={}",
+        member.user_id,
+        member_role(member, lang),
+        permission_list(member.permissions.as_deref(), lang)
+    );
+}
+
+fn member_role(member: &maxoxide::types::ChatMember, lang: Language) -> &'static str {
+    if member.is_owner == Some(true) {
+        tr(lang, "owner", "owner")
+    } else if member.is_admin == Some(true) {
+        tr(lang, "admin", "admin")
+    } else {
+        tr(lang, "member", "member")
+    }
+}
+
+fn permission_list(permissions: Option<&[ChatAdminPermission]>, lang: Language) -> String {
+    let Some(permissions) = permissions else {
+        return tr(lang, "none", "нет").into();
+    };
+
+    if permissions.is_empty() {
+        return tr(lang, "empty", "пусто").into();
+    }
+
+    permissions
+        .iter()
+        .map(ChatAdminPermission::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn chat_type_name(chat_type: &ChatType) -> &str {
     match chat_type {
         ChatType::Dialog => "dialog",
         ChatType::Chat => "chat",
         ChatType::Channel => "channel",
+        ChatType::Unknown(value) => value.as_str(),
+        _ => "unknown",
     }
 }

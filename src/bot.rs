@@ -62,12 +62,40 @@ enum MessageRecipientQuery {
 }
 
 impl MessageRecipientQuery {
-    fn into_query(self) -> [(&'static str, String); 1] {
+    fn append_to(self, params: &mut Vec<(&'static str, String)>) {
         match self {
-            Self::ChatId(chat_id) => [("chat_id", chat_id.to_string())],
-            Self::UserId(user_id) => [("user_id", user_id.to_string())],
+            Self::ChatId(chat_id) => params.push(("chat_id", chat_id.to_string())),
+            Self::UserId(user_id) => params.push(("user_id", user_id.to_string())),
         }
     }
+
+    fn into_query(self) -> Vec<(&'static str, String)> {
+        let mut params = Vec::with_capacity(1);
+        self.append_to(&mut params);
+        params
+    }
+}
+
+fn append_send_options(params: &mut Vec<(&'static str, String)>, options: SendMessageOptions) {
+    if let Some(disable_link_preview) = options.disable_link_preview {
+        params.push(("disable_link_preview", disable_link_preview.to_string()));
+    }
+}
+
+fn comma_join_strings(values: impl IntoIterator<Item = impl Into<String>>) -> String {
+    values
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<String>>()
+        .join(",")
+}
+
+fn comma_join_i64(values: impl IntoIterator<Item = i64>) -> String {
+    values
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<String>>()
+        .join(",")
 }
 
 impl Bot {
@@ -273,8 +301,19 @@ impl Bot {
         recipient: MessageRecipientQuery,
         body: NewMessageBody,
     ) -> Result<Message> {
-        self.post_with_query("/messages", &body, recipient.into_query())
+        self.send_message_to_recipient_with_options(recipient, body, SendMessageOptions::default())
             .await
+    }
+
+    async fn send_message_to_recipient_with_options(
+        &self,
+        recipient: MessageRecipientQuery,
+        body: NewMessageBody,
+        options: SendMessageOptions,
+    ) -> Result<Message> {
+        let mut params = recipient.into_query();
+        append_send_options(&mut params, options);
+        self.post_with_query("/messages", &body, &params).await
     }
 
     /// POST /messages — Send a message to a chat/dialog by `chat_id`.
@@ -290,6 +329,21 @@ impl Bot {
             .await
     }
 
+    /// POST /messages — Send a message to a chat/dialog by `chat_id` with query options.
+    pub async fn send_message_to_chat_with_options(
+        &self,
+        chat_id: i64,
+        body: NewMessageBody,
+        options: SendMessageOptions,
+    ) -> Result<Message> {
+        self.send_message_to_recipient_with_options(
+            MessageRecipientQuery::ChatId(chat_id),
+            body,
+            options,
+        )
+        .await
+    }
+
     /// POST /messages — Send a message to a user by global MAX `user_id`.
     ///
     /// Use this when you know the user's stable MAX identifier, but do not want
@@ -301,6 +355,21 @@ impl Bot {
     ) -> Result<Message> {
         self.send_message_to_recipient(MessageRecipientQuery::UserId(user_id), body)
             .await
+    }
+
+    /// POST /messages — Send a message to a user by global MAX `user_id` with query options.
+    pub async fn send_message_to_user_with_options(
+        &self,
+        user_id: i64,
+        body: NewMessageBody,
+        options: SendMessageOptions,
+    ) -> Result<Message> {
+        self.send_message_to_recipient_with_options(
+            MessageRecipientQuery::UserId(user_id),
+            body,
+            options,
+        )
+        .await
     }
 
     /// Convenience: send a plain-text message to a chat/dialog by `chat_id`.
@@ -391,6 +460,33 @@ impl Bot {
         self.get_with_query("/messages", &params).await
     }
 
+    /// GET /messages — Get one or more messages by IDs.
+    pub async fn get_messages_by_ids(
+        &self,
+        message_ids: impl IntoIterator<Item = impl Into<String>>,
+        count: Option<u32>,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<MessageList> {
+        let mut params: Vec<(&str, String)> =
+            vec![("message_ids", comma_join_strings(message_ids))];
+        if let Some(c) = count {
+            params.push(("count", c.to_string()));
+        }
+        if let Some(f) = from {
+            params.push(("from", f.to_string()));
+        }
+        if let Some(t) = to {
+            params.push(("to", t.to_string()));
+        }
+        self.get_with_query("/messages", &params).await
+    }
+
+    /// GET /videos/{videoToken} — Get video metadata and playback URLs.
+    pub async fn get_video(&self, video_token: &str) -> Result<VideoInfo> {
+        self.get(&format!("/videos/{video_token}")).await
+    }
+
     /// POST /answers — Respond to an inline button callback.
     pub async fn answer_callback(&self, body: AnswerCallbackBody) -> Result<SimpleResult> {
         #[derive(serde::Serialize)]
@@ -460,6 +556,51 @@ impl Bot {
             .await
     }
 
+    /// POST /chats/{chatId}/actions — Send a typed bot action to a group chat.
+    pub async fn send_sender_action(
+        &self,
+        chat_id: i64,
+        action: SenderAction,
+    ) -> Result<SimpleResult> {
+        self.send_action(chat_id, action.as_str()).await
+    }
+
+    /// Convenience: request a typing indicator.
+    pub async fn send_typing_on(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::TypingOn)
+            .await
+    }
+
+    /// Convenience: request an image upload indicator.
+    pub async fn send_sending_image(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::SendingImage)
+            .await
+    }
+
+    /// Convenience: request a video upload indicator.
+    pub async fn send_sending_video(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::SendingVideo)
+            .await
+    }
+
+    /// Convenience: request an audio upload indicator.
+    pub async fn send_sending_audio(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::SendingAudio)
+            .await
+    }
+
+    /// Convenience: request a file upload indicator.
+    pub async fn send_sending_file(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::SendingFile)
+            .await
+    }
+
+    /// Convenience: mark a group chat as seen.
+    pub async fn mark_seen(&self, chat_id: i64) -> Result<SimpleResult> {
+        self.send_sender_action(chat_id, SenderAction::MarkSeen)
+            .await
+    }
+
     // ────────────────────────────────────────────────
     // Pinned messages
     // ────────────────────────────────────────────────
@@ -501,6 +642,19 @@ impl Bot {
             .await
     }
 
+    /// GET /chats/{chatId}/members — Get selected chat members by user IDs.
+    pub async fn get_members_by_ids(
+        &self,
+        chat_id: i64,
+        user_ids: impl IntoIterator<Item = i64>,
+    ) -> Result<ChatMembersList> {
+        self.get_with_query(
+            &format!("/chats/{chat_id}/members"),
+            [("user_ids", comma_join_i64(user_ids))],
+        )
+        .await
+    }
+
     /// POST /chats/{chatId}/members — Add members to a chat.
     pub async fn add_members(&self, chat_id: i64, user_ids: Vec<i64>) -> Result<SimpleResult> {
         self.post(
@@ -522,6 +676,24 @@ impl Bot {
     /// GET /chats/{chatId}/members/admins — Get administrators of a chat.
     pub async fn get_admins(&self, chat_id: i64) -> Result<ChatMembersList> {
         self.get(&format!("/chats/{chat_id}/members/admins")).await
+    }
+
+    /// POST /chats/{chatId}/members/admins — Grant administrator rights.
+    pub async fn add_admins(&self, chat_id: i64, admins: Vec<ChatAdmin>) -> Result<SimpleResult> {
+        self.post(
+            &format!("/chats/{chat_id}/members/admins"),
+            &SetChatAdminsBody {
+                admins,
+                marker: None,
+            },
+        )
+        .await
+    }
+
+    /// DELETE /chats/{chatId}/members/admins/{userId} — Revoke administrator rights.
+    pub async fn remove_admin(&self, chat_id: i64, user_id: i64) -> Result<SimpleResult> {
+        self.delete(&format!("/chats/{chat_id}/members/admins/{user_id}"))
+            .await
     }
 
     /// GET /chats/{chatId}/members/me — Get the bot's membership info in a chat.
@@ -581,6 +753,26 @@ impl Bot {
         self.get_with_query("/updates", &params).await
     }
 
+    /// GET /updates — Poll for raw JSON updates once.
+    pub async fn get_updates_raw(
+        &self,
+        marker: Option<i64>,
+        timeout: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<RawUpdatesResponse> {
+        let mut params: Vec<(&str, String)> = vec![];
+        if let Some(m) = marker {
+            params.push(("marker", m.to_string()));
+        }
+        if let Some(t) = timeout {
+            params.push(("timeout", t.to_string()));
+        }
+        if let Some(l) = limit {
+            params.push(("limit", l.to_string()));
+        }
+        self.get_with_query("/updates", &params).await
+    }
+
     // ────────────────────────────────────────────────
     // Uploads
     // ────────────────────────────────────────────────
@@ -590,7 +782,7 @@ impl Bot {
         self.post_with_query(
             "/uploads",
             &serde_json::Value::Null,
-            [("type", format!("{:?}", upload_type).to_lowercase())],
+            [("type", upload_type.as_str())],
         )
         .await
     }

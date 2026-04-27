@@ -1,6 +1,6 @@
 [package]
 name = "maxoxide"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 description = "Async Rust library for the Max messenger Bot API"
 license = "MIT"
@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
+regex = "1"
 
 # Optional webhook deps (feature = "webhook")
 axum           = { version = "0.8", optional = true }
@@ -38,6 +39,14 @@ path = "examples/echo_bot.rs"
 [[example]]
 name = "keyboard_bot"
 path = "examples/keyboard_bot.rs"
+
+[[example]]
+name = "dispatcher_filters_bot"
+path = "examples/dispatcher_filters_bot.rs"
+
+[[example]]
+name = "media_bot"
+path = "examples/media_bot.rs"
 
 [[example]]
 name = "live_api_test"

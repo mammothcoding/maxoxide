@@ -1,4 +1,4 @@
-//! Webhook bot — production alternative to long polling.
+//! Webhook bot — HTTPS callback alternative to long polling.
 //!
 //! Requires feature: `webhook`
 //!
@@ -15,7 +15,8 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let token = std::env::var("MAX_BOT_TOKEN").expect("MAX_BOT_TOKEN not set");
-    let secret = std::env::var("WEBHOOK_SECRET").unwrap_or_else(|_| "change_me_in_prod".into());
+    let secret =
+        std::env::var("WEBHOOK_SECRET").unwrap_or_else(|_| "change_me_for_public_webhook".into());
     let webhook_url =
         std::env::var("WEBHOOK_URL").unwrap_or_else(|_| "https://your-domain.com/webhook".into());
 
@@ -51,8 +52,8 @@ async fn main() {
 
     tracing::info!("Webhook registered, starting server on :8443");
 
-    // Start the axum server.
-    // In production: put nginx/Caddy in front on port 443.
+    // Start the axum server behind a public HTTPS endpoint.
+    // MAX expects webhook delivery on HTTPS port 443.
     WebhookServer::new(dp)
         .secret(secret)
         .path("/webhook")

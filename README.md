@@ -15,11 +15,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 ## Features
 
 - ✅ Coverage of the published Max Bot REST API
-- ✅ Long polling (dev & test) and **Webhook** via [axum](https://github.com/tokio-rs/axum) (production)
-- ✅ Strongly-typed events (`Update`, `Message`, `Callback`, …)
-- ✅ `Dispatcher` with fluent handler registration and filters
-- ✅ Inline keyboards (all documented button types: `callback`, `link`, `message`, `request_contact`, `request_geo_location`)
-- ✅ File uploads — multipart, correct token flow for video/audio
+- ✅ Long polling and optional **Webhook** server via [axum](https://github.com/tokio-rs/axum)
+- ✅ Forward-compatible typed events (`Update`, `Message`, `Callback`, unknown update fallback)
+- ✅ `Dispatcher` with fluent handler registration, composable filters, startup hooks and scheduled tasks
+- ✅ Inline keyboards (`callback`, `link`, `message`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ File uploads — multipart, image photo-token payloads, correct token flow for video/audio, send helpers for image/video/audio/file
 - ✅ Markdown / HTML message formatting
 - ✅ Webhook secret verification (`X-Max-Bot-Api-Secret`)
 - ✅ Tokio async throughout
@@ -28,11 +28,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = "1.0.0"
+maxoxide = "2.0.0"
 tokio    = { version = "1", features = ["full"] }
 
-# For webhook support (production):
-# maxoxide = { version = "1.0.0", features = ["webhook"] }
+# Enable the built-in axum webhook server:
+# maxoxide = { version = "2.0.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -82,24 +82,34 @@ MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 | `bot.send_markdown_to_user(user_id, text)` | Send Markdown to a user by global MAX `user_id` |
 | `bot.send_message_to_chat(chat_id, body)` | Send message with attachments / keyboard by `chat_id` |
 | `bot.send_message_to_user(user_id, body)` | Send message with attachments / keyboard by global MAX `user_id` |
+| `bot.send_message_to_chat_with_options(chat_id, body, options)` | Send with query options such as `disable_link_preview` |
 | `bot.edit_message(mid, body)` | Edit a message |
 | `bot.delete_message(mid)` | Delete a message |
+| `bot.get_messages_by_ids(ids, …)` | Get one or more messages by message IDs |
+| `bot.get_video(video_token)` | Get video metadata and playback URLs |
 | `bot.answer_callback(body)` | Answer an inline button press |
 | `bot.get_chat(chat_id)` | Chat info |
 | `bot.get_chats(…)` | List all group chats |
 | `bot.edit_chat(chat_id, body)` | Edit chat title / description |
 | `bot.leave_chat(chat_id)` | Leave a chat |
 | `bot.get_members(…)` | List members |
+| `bot.get_members_by_ids(chat_id, user_ids)` | Get selected members |
 | `bot.add_members(…)` | Add members |
 | `bot.remove_member(…)` | Remove a member |
 | `bot.get_admins(chat_id)` | List admins |
+| `bot.add_admins(chat_id, admins)` | Grant admin rights |
+| `bot.remove_admin(chat_id, user_id)` | Revoke admin rights |
 | `bot.pin_message(…)` | Pin a message |
 | `bot.unpin_message(…)` | Unpin |
-| `bot.send_action(chat_id, "typing_on")` | Typing-indicator request; API call works, but client visibility is not confirmed in live MAX tests |
+| `bot.send_sender_action(chat_id, action)` | Send a typed sender action |
 | `bot.subscribe(body)` | Register a webhook |
 | `bot.get_upload_url(type)` | Get upload URL |
 | `bot.upload_file(type, path, name, mime)` | Full two-step file upload |
 | `bot.upload_bytes(type, bytes, name, mime)` | Same, from bytes |
+| `bot.send_image_to_chat(...)` | Upload and send an image |
+| `bot.send_video_to_chat(...)` | Upload and send a video |
+| `bot.send_audio_to_chat(...)` | Upload and send audio |
+| `bot.send_file_to_chat(...)` | Upload and send a generic file |
 | `bot.set_my_commands(commands)` | Experimental: public MAX API currently returns `404` for `/me/commands` |
 
 ## User ID vs Chat ID
@@ -114,11 +124,11 @@ These two IDs are different and should not be used interchangeably:
 
 ## Known MAX platform gaps
 
-As of March 25, 2026, the crate can send these requests, but live behavior on the MAX side is still inconsistent:
+As of April 27, 2026, the crate can send these requests, but live behavior on the MAX side is still inconsistent:
 
 - `Button::RequestContact` is documented by MAX, but live tests received a contact attachment with empty `contact_id` and `vcf_phone`. Sending the button works; receiving the user's phone number is not confirmed on the MAX side.
-- `Button::RequestGeoLocation` is documented by MAX, and the mobile client shows a sent location card, but live polling tests did not observe a matching update on the bot side. End-to-end delivery is not confirmed on the MAX side.
-- `bot.send_action(chat_id, "typing_on")` returns success from the API, but live MAX tests did not confirm a visible typing indicator in the client.
+- `Button::RequestGeoLocation` delivers a structured `Attachment::Location` with `latitude` and `longitude`; the client can render the same shared position as a Yandex Maps card.
+- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` returns success from the API, but live MAX tests did not confirm a visible typing indicator in the client.
 - `bot.set_my_commands` is kept as an experimental helper, but the public MAX REST docs do not list a write endpoint for bot commands, and live `POST /me/commands` requests return `404 Path /me/commands is not recognized`.
 
 ## Dispatcher filters
@@ -130,6 +140,13 @@ dp.on_edited_message(handler);               // edited message
 dp.on_callback(handler);                     // any callback button
 dp.on_callback_payload("btn:ok", handler);   // specific payload
 dp.on_bot_started(handler);                  // user starts bot
+dp.on_update(
+    Filter::message() & Filter::chat(chat_id) & Filter::text_contains("ping"),
+    handler,
+);                                           // composable filters
+dp.on_start(handler);                        // runs before polling starts
+dp.task(Duration::from_secs(60), handler);   // periodic task
+dp.on_raw_update(handler);                   // raw JSON for every update
 dp.on_filter(|u| { … }, handler);            // custom predicate
 dp.on(handler);                              // every update
 ```
@@ -155,12 +172,27 @@ let body = NewMessageBody::text("Are you sure?").with_keyboard(keyboard);
 bot.send_message_to_chat(chat_id, body).await?;
 ```
 
+Clipboard buttons copy their `payload` in the MAX client. They do not send a
+callback update to the bot:
+
+```rust
+let keyboard = KeyboardPayload {
+    buttons: vec![vec![Button::clipboard(
+        "Copy invite code",
+        "MAXOXIDE-2026",
+    )]],
+};
+
+let body = NewMessageBody::empty().with_keyboard(keyboard);
+bot.send_message_to_chat(chat_id, body).await?;
+```
+
 ## File upload
 
 Max uses a two-step upload flow. `upload_file` / `upload_bytes` handle it automatically:
 
 ```rust
-use maxoxide::types::{NewAttachment, NewMessageBody, UploadType, UploadedToken};
+use maxoxide::types::{NewAttachment, NewMessageBody, UploadType};
 
 let token = bot
     .upload_file(UploadType::Image, "./photo.jpg", "photo.jpg", "image/jpeg")
@@ -168,9 +200,7 @@ let token = bot
 
 let body = NewMessageBody {
     text: Some("Here's the photo!".into()),
-    attachments: Some(vec![NewAttachment::Image {
-        payload: UploadedToken { token },
-    }]),
+    attachments: Some(vec![NewAttachment::image(token)]),
     ..Default::default()
 };
 bot.send_message_to_chat(chat_id, body).await?;
@@ -179,6 +209,21 @@ bot.send_message_to_chat(chat_id, body).await?;
 ```
 
 > **Note:** `type=photo` was removed from the Max API. Always use `UploadType::Image`.
+
+For common cases, use upload-and-send helpers:
+
+```rust
+bot.send_image_to_chat(chat_id, "./photo.jpg", "photo.jpg", "image/jpeg", None).await?;
+bot.send_video_to_chat(chat_id, "./clip.mp4", "clip.mp4", "video/mp4", None).await?;
+bot.send_audio_to_chat(chat_id, "./track.mp3", "track.mp3", "audio/mpeg", None).await?;
+bot.send_file_to_chat(chat_id, "./report.pdf", "report.pdf", "application/pdf", None).await?;
+```
+
+There are matching `*_to_user` and `*_bytes_*` helpers.
+
+MAX can take a short time to finish processing uploaded attachments after the upload request succeeds. The upload-and-send helpers retry briefly when the API reports that an attachment is not processed yet.
+
+Image uploads can return a MAX `photos` token map instead of a single token. The `send_image_*` helpers preserve that payload automatically.
 
 ## Webhook server (`features = ["webhook"]`)
 
@@ -202,6 +247,8 @@ WebhookServer::new(dp)
 
 > Max requires HTTPS on port 443 and does **not** support self-signed certificates.
 
+Use webhooks when your bot has a public HTTPS endpoint and you want MAX to deliver updates via incoming requests. For local development and simple launches, long polling is usually enough.
+
 ## Project layout
 
 ```
@@ -215,11 +262,12 @@ maxoxide/
 │   ├── errors.rs       — MaxError
 │   ├── webhook.rs      — axum webhook server (feature = "webhook")
 │   ├── tests.rs        — unit tests
-│   └── types/
-│       └── mod.rs      — all types (User, Chat, Message, Update, …)
+│   └── types.rs        — all types (User, Chat, Message, Update, …)
 └── examples/
     ├── echo_bot.rs
+    ├── dispatcher_filters_bot.rs
     ├── keyboard_bot.rs
+    ├── media_bot.rs
     ├── live_api_test.rs
     └── webhook_bot.rs  (feature = "webhook")
 ```
@@ -244,6 +292,7 @@ At startup it asks in the terminal for:
 - bot URL for the tester
 - optional webhook URL and secret
 - optional local file path for `upload_file`
+- optional image, video and audio paths for media helper checks
 - HTTP timeout, polling timeout and delay between requests
 
 The harness then walks the tester through Max-client actions and records `PASS` / `FAIL` / `SKIP` for real API calls. It uses small delays between requests, drains the long-poll backlog before the run, and asks for explicit confirmation before destructive or non-reversible steps such as:
@@ -252,6 +301,8 @@ The harness then walks the tester through Max-client actions and records `PASS` 
 - `delete_chat`
 - `leave_chat`
 - visible group title edits
+
+The current run also probes the unclear MAX behavior around contact/location request buttons, message buttons, `open_app`, `clipboard`, sender actions, uploaded video metadata, selected members, and temporary admin rights changes.
 
 ## License
 

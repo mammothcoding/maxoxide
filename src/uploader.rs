@@ -3,15 +3,18 @@
 //! The Max API uses a two-step upload flow:
 //!
 //! 1. `POST /uploads?type=<type>` → receive `{ url, token? }`
-//! 2. `POST <url>` multipart form → for **image** and **file** types the upload
-//!    response itself contains the `token`; for **video** and **audio** the token
-//!    is already given in step 1.
+//! 2. `POST <url>` multipart form → receive or activate an attachment token.
+//!
+//! MAX may return the attachment token either in the upload endpoint response,
+//! in the multipart upload response, or for images as a `photos` token map.
+//! Upload-and-send helpers preserve the image `photos` payload and retry briefly
+//! while MAX finishes processing the uploaded attachment.
 //!
 //! # Example
 //!
 //! ```no_run
 //! use maxoxide::Bot;
-//! use maxoxide::types::{NewMessageBody, NewAttachment, UploadedToken, UploadType};
+//! use maxoxide::types::{NewAttachment, NewMessageBody, UploadType};
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -26,9 +29,7 @@
 //!     // Attach it to a message
 //!     let body = NewMessageBody {
 //!         text: Some("Here is a photo".into()),
-//!         attachments: Some(vec![NewAttachment::Image {
-//!             payload: UploadedToken { token },
-//!         }]),
+//!         attachments: Some(vec![NewAttachment::image(token)]),
 //!         ..Default::default()
 //!     };
 //!     bot.send_message_to_chat(12345678, body).await.unwrap();
@@ -36,13 +37,98 @@
 //! ```
 
 use reqwest::multipart;
+use std::time::Duration;
+use tokio::time::sleep;
 use tracing::debug;
 
 use crate::{
     bot::Bot,
     errors::{MaxError, Result},
-    types::{UploadEndpoint, UploadResponse, UploadType},
+    types::{Message, NewAttachment, NewMessageBody, UploadEndpoint, UploadResponse, UploadType},
 };
+
+const ATTACHMENT_READY_RETRY_DELAYS_MS: [u64; 5] = [500, 1_000, 2_000, 4_000, 8_000];
+
+#[derive(Debug, Clone, Copy)]
+enum UploadRecipient {
+    Chat(i64),
+    User(i64),
+}
+
+fn token_from_upload_response(
+    endpoint: &UploadEndpoint,
+    body: &str,
+    upload_type: UploadType,
+) -> Result<String> {
+    let response = serde_json::from_str::<UploadResponse>(body).ok();
+    let body_token = response
+        .as_ref()
+        .and_then(|response| response.token.clone());
+    let first_photo_token = if upload_type == UploadType::Image {
+        response
+            .as_ref()
+            .and_then(|response| response.photos.as_ref())
+            .and_then(|photos| photos.values().next())
+            .map(|photo| photo.token.clone())
+    } else {
+        None
+    };
+
+    body_token
+        .or(first_photo_token)
+        .or_else(|| endpoint.token.clone())
+        .ok_or_else(|| {
+            let message = match upload_type {
+                UploadType::Image | UploadType::File => {
+                    "No token in upload response body or upload endpoint response for image/file"
+                }
+                UploadType::Video | UploadType::Audio => {
+                    "No token in upload endpoint response or upload response body for video/audio"
+                }
+            };
+
+            MaxError::Api {
+                code: 0,
+                message: message.into(),
+            }
+        })
+}
+
+fn attachment_from_upload_response(
+    endpoint: &UploadEndpoint,
+    body: &str,
+    upload_type: UploadType,
+) -> Result<NewAttachment> {
+    let image_photos = if upload_type == UploadType::Image {
+        serde_json::from_str::<UploadResponse>(body)
+            .ok()
+            .and_then(|response| response.photos)
+            .filter(|photos| !photos.is_empty())
+    } else {
+        None
+    };
+
+    if let Some(photos) = image_photos {
+        return Ok(NewAttachment::image_photos(photos));
+    }
+
+    let token = token_from_upload_response(endpoint, body, upload_type.clone())?;
+    let attachment = match upload_type {
+        UploadType::Image => NewAttachment::image(token),
+        UploadType::Video => NewAttachment::video(token),
+        UploadType::Audio => NewAttachment::audio(token),
+        UploadType::File => NewAttachment::file(token),
+    };
+
+    Ok(attachment)
+}
+
+fn is_attachment_not_processed_error(error: &MaxError) -> bool {
+    matches!(
+        error,
+        MaxError::Api { message, .. } if message.contains(".not.processed")
+    )
+}
 
 impl Bot {
     /// Full two-step upload:
@@ -52,9 +138,10 @@ impl Bot {
     ///
     /// Returns the **attachment token** to use in `NewAttachment`.
     ///
-    /// For `image` and `file` types the token comes from the upload response body.
-    /// For `video` and `audio` the token is pre-issued in step 1; the upload
-    /// response is not used for the token (it returns a `retval` instead).
+    /// MAX can return the token from the upload endpoint response, from the
+    /// multipart upload response, or for images as a `photos` token map. This
+    /// method accepts all forms and returns the first usable token. The
+    /// higher-level `send_image_*` helpers preserve the full `photos` payload.
     ///
     /// # Arguments
     /// * `upload_type` — one of `Image`, `Video`, `Audio`, `File`.
@@ -99,6 +186,326 @@ impl Bot {
             .await
     }
 
+    /// Upload an image from disk and send it to a chat.
+    pub async fn send_image_to_chat(
+        &self,
+        chat_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Image,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload a video from disk and send it to a chat.
+    pub async fn send_video_to_chat(
+        &self,
+        chat_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Video,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload an audio file from disk and send it to a chat.
+    pub async fn send_audio_to_chat(
+        &self,
+        chat_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Audio,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload a generic file from disk and send it to a chat.
+    pub async fn send_file_to_chat(
+        &self,
+        chat_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::File,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload an image from disk and send it to a user.
+    pub async fn send_image_to_user(
+        &self,
+        user_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Image,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload a video from disk and send it to a user.
+    pub async fn send_video_to_user(
+        &self,
+        user_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Video,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload an audio file from disk and send it to a user.
+    pub async fn send_audio_to_user(
+        &self,
+        user_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Audio,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload a generic file from disk and send it to a user.
+    pub async fn send_file_to_user(
+        &self,
+        user_id: i64,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_file_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::File,
+            path,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload image bytes and send them to a chat.
+    pub async fn send_image_bytes_to_chat(
+        &self,
+        chat_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Image,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload video bytes and send them to a chat.
+    pub async fn send_video_bytes_to_chat(
+        &self,
+        chat_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Video,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload audio bytes and send them to a chat.
+    pub async fn send_audio_bytes_to_chat(
+        &self,
+        chat_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::Audio,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload file bytes and send them to a chat.
+    pub async fn send_file_bytes_to_chat(
+        &self,
+        chat_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::Chat(chat_id),
+            UploadType::File,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload image bytes and send them to a user.
+    pub async fn send_image_bytes_to_user(
+        &self,
+        user_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Image,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload video bytes and send them to a user.
+    pub async fn send_video_bytes_to_user(
+        &self,
+        user_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Video,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload audio bytes and send them to a user.
+    pub async fn send_audio_bytes_to_user(
+        &self,
+        user_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::Audio,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
+    /// Upload file bytes and send them to a user.
+    pub async fn send_file_bytes_to_user(
+        &self,
+        user_id: i64,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        self.upload_bytes_and_send(
+            UploadRecipient::User(user_id),
+            UploadType::File,
+            bytes,
+            filename,
+            mime,
+            text,
+        )
+        .await
+    }
+
     // ────────────────────────────────────────────────
     // Internal
     // ────────────────────────────────────────────────
@@ -110,6 +517,33 @@ impl Bot {
         filename: String,
         mime: String,
         upload_type: UploadType,
+    ) -> Result<String> {
+        let body = self
+            .upload_bytes_to_url_body(endpoint, bytes, filename, mime)
+            .await?;
+        token_from_upload_response(endpoint, &body, upload_type)
+    }
+
+    async fn upload_bytes_to_url_as_attachment(
+        &self,
+        endpoint: &UploadEndpoint,
+        bytes: Vec<u8>,
+        filename: String,
+        mime: String,
+        upload_type: UploadType,
+    ) -> Result<NewAttachment> {
+        let body = self
+            .upload_bytes_to_url_body(endpoint, bytes, filename, mime)
+            .await?;
+        attachment_from_upload_response(endpoint, &body, upload_type)
+    }
+
+    async fn upload_bytes_to_url_body(
+        &self,
+        endpoint: &UploadEndpoint,
+        bytes: Vec<u8>,
+        filename: String,
+        mime: String,
     ) -> Result<String> {
         let part = multipart::Part::bytes(bytes)
             .file_name(filename)
@@ -139,23 +573,197 @@ impl Bot {
             });
         }
 
-        // For video/audio: token is pre-issued in `endpoint.token`.
-        // For image/file: token comes from the upload response body.
-        match upload_type {
-            UploadType::Video | UploadType::Audio => {
-                endpoint.token.clone().ok_or_else(|| MaxError::Api {
-                    code: 0,
-                    message: "No token in upload endpoint response for video/audio".into(),
-                })
+        Ok(body)
+    }
+
+    async fn upload_file_and_send(
+        &self,
+        recipient: UploadRecipient,
+        upload_type: UploadType,
+        path: impl AsRef<std::path::Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        let endpoint = self.get_upload_url(upload_type.clone()).await?;
+        debug!("Upload URL: {}", endpoint.url);
+
+        let bytes = tokio::fs::read(path).await.map_err(|e| MaxError::Api {
+            code: 0,
+            message: format!("Failed to read file: {e}"),
+        })?;
+
+        let attachment = self
+            .upload_bytes_to_url_as_attachment(
+                &endpoint,
+                bytes,
+                filename.into(),
+                mime.into(),
+                upload_type,
+            )
+            .await?;
+
+        self.send_uploaded_attachment(recipient, attachment, text)
+            .await
+    }
+
+    async fn upload_bytes_and_send(
+        &self,
+        recipient: UploadRecipient,
+        upload_type: UploadType,
+        bytes: Vec<u8>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Message> {
+        let endpoint = self.get_upload_url(upload_type.clone()).await?;
+        debug!("Upload URL: {}", endpoint.url);
+
+        let attachment = self
+            .upload_bytes_to_url_as_attachment(
+                &endpoint,
+                bytes,
+                filename.into(),
+                mime.into(),
+                upload_type,
+            )
+            .await?;
+
+        self.send_uploaded_attachment(recipient, attachment, text)
+            .await
+    }
+
+    async fn send_uploaded_attachment(
+        &self,
+        recipient: UploadRecipient,
+        attachment: NewAttachment,
+        text: Option<String>,
+    ) -> Result<Message> {
+        for (attempt, retry_delay_ms) in std::iter::once(0)
+            .chain(ATTACHMENT_READY_RETRY_DELAYS_MS)
+            .enumerate()
+        {
+            if retry_delay_ms > 0 {
+                sleep(Duration::from_millis(retry_delay_ms)).await;
             }
-            UploadType::Image | UploadType::File => {
-                let upload_resp: UploadResponse =
-                    serde_json::from_str(&body).map_err(MaxError::Json)?;
-                upload_resp.token.ok_or_else(|| MaxError::Api {
-                    code: 0,
-                    message: "No token in upload response body for image/file".into(),
-                })
+
+            let body = NewMessageBody::text_opt(text.clone()).with_attachment(attachment.clone());
+
+            let result = match recipient {
+                UploadRecipient::Chat(chat_id) => self.send_message_to_chat(chat_id, body).await,
+                UploadRecipient::User(user_id) => self.send_message_to_user(user_id, body).await,
+            };
+
+            match result {
+                Ok(message) => return Ok(message),
+                Err(error)
+                    if is_attachment_not_processed_error(&error)
+                        && attempt < ATTACHMENT_READY_RETRY_DELAYS_MS.len() =>
+                {
+                    debug!(
+                        "Uploaded attachment is not processed yet; retrying send in {} ms",
+                        ATTACHMENT_READY_RETRY_DELAYS_MS[attempt]
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
+
+        unreachable!("uploaded attachment retry loop always returns on the final attempt")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        attachment_from_upload_response, is_attachment_not_processed_error,
+        token_from_upload_response,
+    };
+    use crate::{
+        errors::MaxError,
+        types::{NewAttachment, UploadEndpoint, UploadType},
+    };
+
+    fn endpoint(token: Option<&str>) -> UploadEndpoint {
+        UploadEndpoint {
+            url: "https://upload.example.test".into(),
+            token: token.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn upload_token_prefers_multipart_response_body() {
+        let token = token_from_upload_response(
+            &endpoint(Some("endpoint_token")),
+            r#"{"token":"body_token"}"#,
+            UploadType::File,
+        )
+        .unwrap();
+
+        assert_eq!(token, "body_token");
+    }
+
+    #[test]
+    fn upload_token_falls_back_to_endpoint_token() {
+        let token = token_from_upload_response(
+            &endpoint(Some("endpoint_token")),
+            r#"{}"#,
+            UploadType::Image,
+        )
+        .unwrap();
+
+        assert_eq!(token, "endpoint_token");
+    }
+
+    #[test]
+    fn upload_token_falls_back_to_first_photo_token_for_images() {
+        let token = token_from_upload_response(
+            &endpoint(None),
+            r#"{"photos":{"photo-1":{"token":"photo_token"}}}"#,
+            UploadType::Image,
+        )
+        .unwrap();
+
+        assert_eq!(token, "photo_token");
+    }
+
+    #[test]
+    fn image_attachment_uses_uploaded_photo_tokens() {
+        let attachment = attachment_from_upload_response(
+            &endpoint(None),
+            r#"{"photos":{"photo-1":{"token":"photo_token"}}}"#,
+            UploadType::Image,
+        )
+        .unwrap();
+
+        let NewAttachment::Image { payload } = attachment else {
+            panic!("image upload should create an image attachment");
+        };
+
+        let photos = payload
+            .photos
+            .expect("image attachment should carry photos");
+        assert_eq!(photos["photo-1"].token, "photo_token");
+        assert!(payload.token.is_none());
+    }
+
+    #[test]
+    fn upload_token_reports_missing_token() {
+        let error = token_from_upload_response(&endpoint(None), r#"{}"#, UploadType::Image)
+            .expect_err("missing token should fail");
+
+        assert!(error.to_string().contains("No token"));
+    }
+
+    #[test]
+    fn detects_attachment_processing_errors() {
+        assert!(is_attachment_not_processed_error(&MaxError::Api {
+            code: 400,
+            message: "Key: errors.process.attachment.file.not.processed".into(),
+        }));
+        assert!(!is_attachment_not_processed_error(&MaxError::Api {
+            code: 400,
+            message: "permission.denied".into(),
+        }));
     }
 }

@@ -2,6 +2,174 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-04-27
+
+### EN
+
+#### Release summary
+
+This release aligns `maxoxide` with the current public MAX REST API, adds convenience helpers for media sending, makes update parsing more forward-compatible, and expands the dispatcher into a more practical routing layer.
+
+#### Breaking changes
+
+- `User::name` was replaced with MAX-style profile fields:
+  - `first_name`
+  - `last_name`
+  - `username`
+  - `description`
+  - `avatar_url`
+  - `full_avatar_url`
+  - `commands`
+- Use `User::display_name()` when the old code needs a single printable name.
+- `Update::timestamp()` now returns `Option<i64>` because unknown future updates may omit a timestamp.
+- Use `Update::timestamp_or_default()` when the previous `0` fallback behavior is desired.
+- `MessageFormat::Plain` was removed. Plain text is represented by leaving `NewMessageBody::format` as `None`.
+- `Button::open_app(...)` now follows the official Go SDK wire model with `web_app`, optional `payload`, and optional `contact_id` fields instead of an opaque JSON payload.
+- `NewAttachment::Image` now carries `ImageAttachmentPayload` instead of `UploadedToken`, so it can serialize the official MAX `photos` token map returned by image uploads. `NewAttachment::image(token)` remains available for the simple token form.
+- Public enums that mirror MAX wire values are now `#[non_exhaustive]`; downstream exhaustive matches need a wildcard arm.
+- `src/types/mod.rs` was replaced by `src/types.rs`. The public path remains `maxoxide::types`.
+
+#### Added
+
+- Added typed fallback support for unknown `Update` and unknown attachments, preserving raw JSON for later inspection.
+- Added attachment deserialization for both wrapped `payload` objects and flat attachment objects, so `Button::RequestGeoLocation` updates deserialize as `Attachment::Location` with `latitude` and `longitude`. The client can render the same shared position as a Yandex Maps card.
+- Added typed string enums with unknown-value preservation:
+  - `ChatType`
+  - `ChatStatus`
+  - `MessageFormat`
+  - `ButtonIntent`
+  - `LinkType`
+  - `ChatAdminPermission`
+  - `SenderAction`
+- Added more complete MAX models for users, chats, members, admins, video metadata, photo payloads, and partial success results.
+- Added `Button::OpenApp` using the official Go SDK fields `web_app`, `payload`, and `contact_id`.
+- Added `Button::Clipboard`, which is present in the official Go SDK and can be validated through the live harness.
+- Added builders for `NewMessageBody`, `NewAttachment`, and `UploadedToken`.
+- Added `SendMessageOptions` with `disable_link_preview`.
+- Added message, video, member, and admin endpoints:
+  - `get_messages_by_ids`
+  - `get_video`
+  - `get_members_by_ids`
+  - `add_admins`
+  - `remove_admin`
+- Added typed sender action methods:
+  - `send_sender_action`
+  - `send_typing_on`
+  - `send_sending_image`
+  - `send_sending_video`
+  - `send_sending_audio`
+  - `send_sending_file`
+  - `mark_seen`
+- Added upload-and-send helpers for both chat and user recipients:
+  - `send_image_to_chat` / `send_image_to_user`
+  - `send_video_to_chat` / `send_video_to_user`
+  - `send_audio_to_chat` / `send_audio_to_user`
+  - `send_file_to_chat` / `send_file_to_user`
+  - byte-based variants for the same media types
+- Added `Dispatcher::on_update`, composable `Filter` values, regex text filters, media/file attachment filters, `on_start`, `task`, `on_raw_update`, and raw polling via `get_updates_raw`.
+- Added `examples/media_bot.rs` and `examples/dispatcher_filters_bot.rs`.
+
+#### Changed
+
+- `get_upload_url` now serializes upload types using the documented lowercase wire values.
+- Long polling now receives raw update JSON first, then dispatches through raw and typed handlers.
+- Webhook handling now dispatches raw JSON through the same dispatcher path as long polling.
+- Upload helpers now accept attachment tokens from either the upload endpoint response or multipart upload response, preserve the MAX `photos` token map for image send helpers, and retry briefly while MAX reports an uploaded attachment as not processed yet.
+- The live harness now treats empty contact phone payloads as a MAX platform gap, recognizes structured request-location attachments, logs non-matching updates during manual waits, and checks the bot's granular `add_admins` permission before probing admin-right changes.
+- README examples now use builders and the new media helpers.
+- The crate version was bumped to `2.0.0`.
+
+#### Verification
+
+- `cargo fmt --all`
+- `cargo check --all-targets --all-features`
+- `cargo test`
+- `cargo test --features webhook`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+### RU
+
+#### Кратко о релизе
+
+Этот релиз синхронизирует `maxoxide` с текущим публичным REST API MAX, добавляет helpers для отправки медиа, делает разбор обновлений устойчивее к будущим типам MAX и расширяет `Dispatcher` до более практичного роутинга.
+
+#### Ломающие изменения
+
+- `User::name` заменён на поля профиля в стиле MAX:
+  - `first_name`
+  - `last_name`
+  - `username`
+  - `description`
+  - `avatar_url`
+  - `full_avatar_url`
+  - `commands`
+- Если старому коду нужна одна строка для отображения имени, используйте `User::display_name()`.
+- `Update::timestamp()` теперь возвращает `Option<i64>`, потому что неизвестные будущие update могут не содержать timestamp.
+- Для старого поведения с fallback в `0` используйте `Update::timestamp_or_default()`.
+- `MessageFormat::Plain` удалён. Обычный текст задаётся отсутствием `format` в `NewMessageBody`.
+- `Button::open_app(...)` теперь следует wire-модели официального Go SDK с полями `web_app`, optional `payload` и optional `contact_id`, а не opaque JSON payload.
+- `NewAttachment::Image` теперь хранит `ImageAttachmentPayload` вместо `UploadedToken`, чтобы сериализовать официальный MAX `photos` token map, который возвращают image uploads. `NewAttachment::image(token)` остаётся доступным для простой token-формы.
+- Публичные enum, отражающие wire-значения MAX, теперь `#[non_exhaustive]`; во внешнем коде exhaustive `match` должны иметь wildcard arm.
+- `src/types/mod.rs` заменён на `src/types.rs`. Публичный путь остаётся прежним: `maxoxide::types`.
+
+#### Добавлено
+
+- Добавлен fallback для неизвестных `Update` и неизвестных вложений с сохранением raw JSON.
+- Добавлен разбор вложений как в wrapped `payload` форме, так и в плоской форме attachment object, поэтому updates от `Button::RequestGeoLocation` десериализуются как `Attachment::Location` с `latitude` и `longitude`. В клиенте та же отправленная позиция может отображаться как карточка Яндекс Карт.
+- Добавлены типизированные строковые enum с сохранением неизвестных значений:
+  - `ChatType`
+  - `ChatStatus`
+  - `MessageFormat`
+  - `ButtonIntent`
+  - `LinkType`
+  - `ChatAdminPermission`
+  - `SenderAction`
+- Расширены модели MAX для пользователей, чатов, участников, администраторов, video metadata, photo payloads и частично успешных результатов.
+- Добавлен `Button::OpenApp` с полями официального Go SDK: `web_app`, `payload`, `contact_id`.
+- Добавлен `Button::Clipboard`, который есть в официальном Go SDK и проверяется через live harness.
+- Добавлены builders для `NewMessageBody`, `NewAttachment` и `UploadedToken`.
+- Добавлен `SendMessageOptions` с `disable_link_preview`.
+- Добавлены методы для сообщений, видео, участников и администраторов:
+  - `get_messages_by_ids`
+  - `get_video`
+  - `get_members_by_ids`
+  - `add_admins`
+  - `remove_admin`
+- Добавлены типизированные действия отправителя:
+  - `send_sender_action`
+  - `send_typing_on`
+  - `send_sending_image`
+  - `send_sending_video`
+  - `send_sending_audio`
+  - `send_sending_file`
+  - `mark_seen`
+- Добавлены helpers загрузки и отправки для chat/user адресатов:
+  - `send_image_to_chat` / `send_image_to_user`
+  - `send_video_to_chat` / `send_video_to_user`
+  - `send_audio_to_chat` / `send_audio_to_user`
+  - `send_file_to_chat` / `send_file_to_user`
+  - byte-based варианты для тех же типов медиа
+- Добавлены `Dispatcher::on_update`, составные `Filter`, regex-фильтры текста, фильтры media/file вложений, `on_start`, `task`, `on_raw_update` и raw polling через `get_updates_raw`.
+- Добавлены `examples/media_bot.rs` и `examples/dispatcher_filters_bot.rs`.
+
+#### Изменено
+
+- `get_upload_url` теперь сериализует типы загрузки документированными lowercase wire-значениями.
+- Long polling сначала получает raw JSON update, затем dispatch проходит через raw и typed handlers.
+- Webhook теперь dispatchит raw JSON тем же путём, что и long polling.
+- Upload helpers принимают attachment token как из ответа upload endpoint, так и из multipart upload response, сохраняют MAX `photos` token map для image send helpers и коротко ретраят отправку, пока MAX сообщает, что вложение ещё не обработано.
+- Live harness теперь помечает пустой телефон в contact payload как platform gap MAX, распознаёт структурированные request-location attachments, логирует неподходящие updates во время ручного ожидания и проверяет granular-право бота `add_admins` перед проверкой изменения admin-прав.
+- Примеры README переведены на builders и новые media helpers.
+- Версия крейта повышена до `2.0.0`.
+
+#### Проверка
+
+- `cargo fmt --all`
+- `cargo check --all-targets --all-features`
+- `cargo test`
+- `cargo test --features webhook`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ## [1.0.0] - 2026-03-25
 
 ### EN
