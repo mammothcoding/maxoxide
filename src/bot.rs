@@ -82,6 +82,23 @@ fn append_send_options(params: &mut Vec<(&'static str, String)>, options: SendMe
     }
 }
 
+fn append_update_query(
+    params: &mut Vec<(&'static str, String)>,
+    marker: Option<i64>,
+    timeout: Option<u32>,
+    limit: Option<u32>,
+) {
+    if let Some(m) = marker {
+        params.push(("marker", m.to_string()));
+    }
+    if let Some(t) = timeout {
+        params.push(("timeout", t.to_string()));
+    }
+    if let Some(l) = limit {
+        params.push(("limit", l.to_string()));
+    }
+}
+
 fn comma_join_strings(values: impl IntoIterator<Item = impl Into<String>>) -> String {
     values
         .into_iter()
@@ -290,6 +307,11 @@ impl Bot {
     /// GET /me — Returns info about the current bot.
     pub async fn get_me(&self) -> Result<User> {
         self.get("/me").await
+    }
+
+    /// PATCH /me — Edit the current bot's profile, commands, or avatar.
+    pub async fn edit_my_info(&self, body: EditMyInfoBody) -> Result<User> {
+        self.patch("/me", &body).await
     }
 
     // ────────────────────────────────────────────────
@@ -666,11 +688,24 @@ impl Bot {
 
     /// DELETE /chats/{chatId}/members — Remove a member from a chat.
     pub async fn remove_member(&self, chat_id: i64, user_id: i64) -> Result<SimpleResult> {
-        self.delete_with_query(
-            &format!("/chats/{chat_id}/members"),
-            [("user_id", user_id.to_string())],
-        )
-        .await
+        self.remove_member_with_options(chat_id, user_id, RemoveMemberOptions::default())
+            .await
+    }
+
+    /// DELETE /chats/{chatId}/members — Remove a member with query options.
+    pub async fn remove_member_with_options(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        options: RemoveMemberOptions,
+    ) -> Result<SimpleResult> {
+        let mut params = vec![("user_id", user_id.to_string())];
+        if let Some(block) = options.block {
+            params.push(("block", block.to_string()));
+        }
+
+        self.delete_with_query(&format!("/chats/{chat_id}/members"), &params)
+            .await
     }
 
     /// GET /chats/{chatId}/members/admins — Get administrators of a chat.
@@ -741,14 +776,23 @@ impl Bot {
         limit: Option<u32>,
     ) -> Result<UpdatesResponse> {
         let mut params: Vec<(&str, String)> = vec![];
-        if let Some(m) = marker {
-            params.push(("marker", m.to_string()));
-        }
-        if let Some(t) = timeout {
-            params.push(("timeout", t.to_string()));
-        }
-        if let Some(l) = limit {
-            params.push(("limit", l.to_string()));
+        append_update_query(&mut params, marker, timeout, limit);
+        self.get_with_query("/updates", &params).await
+    }
+
+    /// GET /updates — Poll for selected update types once.
+    pub async fn get_updates_with_types(
+        &self,
+        marker: Option<i64>,
+        timeout: Option<u32>,
+        limit: Option<u32>,
+        types: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<UpdatesResponse> {
+        let mut params: Vec<(&str, String)> = vec![];
+        append_update_query(&mut params, marker, timeout, limit);
+        let types = comma_join_strings(types);
+        if !types.is_empty() {
+            params.push(("types", types));
         }
         self.get_with_query("/updates", &params).await
     }
@@ -761,14 +805,23 @@ impl Bot {
         limit: Option<u32>,
     ) -> Result<RawUpdatesResponse> {
         let mut params: Vec<(&str, String)> = vec![];
-        if let Some(m) = marker {
-            params.push(("marker", m.to_string()));
-        }
-        if let Some(t) = timeout {
-            params.push(("timeout", t.to_string()));
-        }
-        if let Some(l) = limit {
-            params.push(("limit", l.to_string()));
+        append_update_query(&mut params, marker, timeout, limit);
+        self.get_with_query("/updates", &params).await
+    }
+
+    /// GET /updates — Poll raw JSON for selected update types once.
+    pub async fn get_updates_raw_with_types(
+        &self,
+        marker: Option<i64>,
+        timeout: Option<u32>,
+        limit: Option<u32>,
+        types: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<RawUpdatesResponse> {
+        let mut params: Vec<(&str, String)> = vec![];
+        append_update_query(&mut params, marker, timeout, limit);
+        let types = comma_join_strings(types);
+        if !types.is_empty() {
+            params.push(("types", types));
         }
         self.get_with_query("/updates", &params).await
     }

@@ -2,6 +2,100 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-05-20
+
+### EN
+
+#### Release summary
+
+This compatible release tracks the May 2026 MAX Bot API updates without changing the existing `2.0.0` message/update method signatures.
+
+#### Added
+
+- Added typed update support for `bot_stopped`, `dialog_cleared`, `dialog_muted`, `dialog_unmuted`, `dialog_removed`, experimental `message_chat_created`, and nullable `message_edited` payloads via `Update::MessageEditedMissing`.
+- Added `MarkupElement` parsing for strong, emphasized, monospaced, link, strikethrough, underline, user mention, heading, highlighted, and quote markup.
+- Added `Button::Chat` plus builders for chat buttons.
+- Added contact payload fields `hash` and `max_info`, `tam_info` alias compatibility, VCF phone extraction, and `ContactPayload::validate_hash(token)`.
+- Added received `share` and `data` attachment variants and extra media fields such as video thumbnail/dimensions/duration and audio transcription.
+- Added `Bot::edit_my_info`, `Bot::get_updates_with_types`, `Bot::get_updates_raw_with_types`, and `Bot::remove_member_with_options`.
+- Added dispatcher filters and handler helpers for the newly typed updates.
+
+#### Changed
+
+- The live API harness now probes filtered polling, message markup, contact hash/max_info, optional dialog events, and opt-in chat-button chat creation with explicit cleanup choice.
+- The live API harness now supports both update transports at startup: `long_polling` and `webhook`.
+- In `long_polling` mode, the live API harness checks active webhook subscriptions, warns that they disable long polling, can temporarily unsubscribe them, and restores them at the end using the webhook secret entered during startup.
+- In `webhook` mode, the live API harness starts a minimal local webhook receiver so manual waits can consume incoming webhook POSTs without enabling the optional crate `webhook` feature.
+- The live API harness now treats MAX `ChatButton` send-time deserialization failures as an opt-in platform limitation, prints the outgoing JSON, and can capture raw `message_chat_created` updates for investigation.
+- Live testing confirmed that the group-chat typing indicator is now visible for `typing_on`.
+- The live group phase now exercises `remove_member_with_options` and asks before passing `block=true`.
+- The live group phase now treats `add_admins` attempts for non-participant user IDs as skipped precondition failures instead of SDK/API failures.
+- The crate version was bumped to `2.1.0`.
+
+#### Live API observations
+
+- Full long-polling live run completed with `89 PASS / 0 FAIL / 8 SKIP`.
+- `request_contact` is live-confirmed to deliver `vcf_info`, a valid `hash`, and `max_info`; `vcf_phone` may still be empty, so `phones_from_vcf()` is the reliable fallback.
+- `request_geo_location` is live-confirmed to deliver structured `Attachment::Location` coordinates.
+- Webhook subscribe/unsubscribe and pre-polling restore were live-confirmed.
+- `ChatButton` remains a MAX platform limitation in current live testing: documented `chat` button JSON is rejected by `POST /messages` with `400 Can't deserialize body`.
+- `set_my_commands` remains a MAX platform limitation: public live `POST /me/commands` requests return `404`.
+
+#### Verification
+
+- `cargo fmt --all`
+- `cargo check --all-targets --all-features`
+- `cargo test`
+- `cargo test --features webhook --target-dir /tmp/opencode/maxoxide-target`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- Full live API run against a real MAX bot: `89 PASS / 0 FAIL / 8 SKIP`
+
+### RU
+
+#### Кратко о релизе
+
+Совместимый релиз, который подтягивает изменения MAX Bot API за май 2026 без изменения существующих сигнатур сообщений, updates и методов из `2.0.0`.
+
+#### Добавлено
+
+- Добавлен typed-разбор updates `bot_stopped`, `dialog_cleared`, `dialog_muted`, `dialog_unmuted`, `dialog_removed`, experimental `message_chat_created` и nullable `message_edited` через `Update::MessageEditedMissing`.
+- Добавлен `MarkupElement` для strong, emphasized, monospaced, link, strikethrough, underline, user mention, heading, highlighted и quote markup.
+- Добавлен `Button::Chat` и builders для chat-кнопок.
+- Добавлены поля contact payload `hash` и `max_info`, alias `tam_info`, извлечение телефонов из VCF и `ContactPayload::validate_hash(token)`.
+- Добавлены variants вложений `share` и `data`, а также дополнительные поля media: thumbnail/размеры/duration для video и transcription для audio.
+- Добавлены `Bot::edit_my_info`, `Bot::get_updates_with_types`, `Bot::get_updates_raw_with_types` и `Bot::remove_member_with_options`.
+- Добавлены dispatcher filters и handler helpers для новых typed updates.
+
+#### Изменено
+
+- Live API harness теперь проверяет filtered polling, message markup, contact hash/max_info, optional dialog events и opt-in создание чата через chat-кнопку с явным выбором cleanup.
+- Live API harness теперь поддерживает оба транспорта updates на старте: `long_polling` и `webhook`.
+- В режиме `long_polling` live API harness проверяет активные webhook subscriptions, предупреждает, что они отключают long polling, может временно отписать их и восстанавливает их в конце с webhook secret, введённым при старте.
+- В режиме `webhook` live API harness запускает минимальный локальный webhook receiver, чтобы ручные ожидания читали входящие webhook POST без включения optional crate feature `webhook`.
+- Live API harness теперь помечает send-time ошибку десериализации MAX `ChatButton` как opt-in ограничение платформы, печатает исходящий JSON и умеет ловить raw `message_chat_created` для расследования.
+- Live-тест подтвердил, что индикатор набора текста в групповом чате теперь виден для `typing_on`.
+- Групповой этап live harness проверяет `remove_member_with_options` и спрашивает перед `block=true`.
+- Групповой этап live harness теперь помечает `add_admins` для user_id, который не является участником чата, как пропущенное предусловие, а не как ошибку SDK/API.
+- Версия крейта повышена до `2.1.0`.
+
+#### Наблюдения live API
+
+- Полный live-прогон через long polling завершился с `89 PASS / 0 FAIL / 8 SKIP`.
+- `request_contact` live-подтверждён: приходит `vcf_info`, валидный `hash` и `max_info`; `vcf_phone` всё ещё может быть пустым, поэтому `phones_from_vcf()` — надёжный fallback.
+- `request_geo_location` live-подтверждён: приходят структурированные координаты `Attachment::Location`.
+- Webhook subscribe/unsubscribe и восстановление перед long polling live-подтверждены.
+- `ChatButton` остаётся ограничением платформы MAX в текущем live-тестировании: документированный JSON `chat`-кнопки отклоняется `POST /messages` с `400 Can't deserialize body`.
+- `set_my_commands` остаётся ограничением платформы MAX: публичные live-запросы `POST /me/commands` возвращают `404`.
+
+#### Проверка
+
+- `cargo fmt --all`
+- `cargo check --all-targets --all-features`
+- `cargo test`
+- `cargo test --features webhook --target-dir /tmp/opencode/maxoxide-target`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- Полный live API прогон на реальном MAX-боте: `89 PASS / 0 FAIL / 8 SKIP`
+
 ## [2.0.0] - 2026-04-27
 
 ### EN

@@ -18,7 +18,8 @@ Readme на разных языках:
 - ✅ Long polling и опциональный **Webhook**-сервер на [axum](https://github.com/tokio-rs/axum)
 - ✅ Типизированные события с fallback для неизвестных обновлений (`Update`, `Message`, `Callback`)
 - ✅ `Dispatcher` с регистрацией хендлеров, составными фильтрами, startup hooks и периодическими задачами
-- ✅ Inline-клавиатура (`callback`, `link`, `message`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ Inline-клавиатура (`callback`, `link`, `message`, `chat`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ Разбор markup текста сообщений, включая quote markup и fallback для неизвестной разметки
 - ✅ Загрузка файлов — multipart, `photos` payload для image, правильный порядок токенов для видео/аудио, helpers для image/video/audio/file
 - ✅ Форматирование Markdown / HTML
 - ✅ Верификация Webhook-секрета (`X-Max-Bot-Api-Secret`)
@@ -28,11 +29,11 @@ Readme на разных языках:
 
 ```toml
 [dependencies]
-maxoxide = "2.0.0"
+maxoxide = "2.1.0"
 tokio    = { version = "1", features = ["full"] }
 
 # Включить встроенный webhook-сервер на axum:
-# maxoxide = { version = "2.0.0", features = ["webhook"] }
+# maxoxide = { version = "2.1.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -76,6 +77,7 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | Метод | Описание |
 |-------|----------|
 | `bot.get_me()` | Информация о боте |
+| `bot.edit_my_info(body)` | Изменить профиль, команды или аватар бота через `PATCH /me` |
 | `bot.send_text_to_chat(chat_id, text)` | Отправить текст в диалог/группу/канал по `chat_id` |
 | `bot.send_text_to_user(user_id, text)` | Отправить текст пользователю по глобальному MAX `user_id` |
 | `bot.send_markdown_to_chat(chat_id, text)` | Отправить Markdown в диалог/группу/канал по `chat_id` |
@@ -96,12 +98,15 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.get_members_by_ids(chat_id, user_ids)` | Получить выбранных участников |
 | `bot.add_members(…)` | Добавить участников |
 | `bot.remove_member(…)` | Удалить участника |
+| `bot.remove_member_with_options(…, options)` | Удалить участника с настройками, например `block=true` |
 | `bot.get_admins(chat_id)` | Администраторы |
 | `bot.add_admins(chat_id, admins)` | Выдать права администратора |
 | `bot.remove_admin(chat_id, user_id)` | Снять права администратора |
 | `bot.pin_message(…)` | Закрепить сообщение |
 | `bot.unpin_message(…)` | Открепить |
 | `bot.send_sender_action(chat_id, action)` | Отправить типизированное действие бота |
+| `bot.get_updates_with_types(…, types)` | Long polling только для выбранных типов update |
+| `bot.get_updates_raw_with_types(…, types)` | Raw JSON long polling только для выбранных типов update |
 | `bot.subscribe(body)` | Подписаться на Webhook |
 | `bot.get_upload_url(type)` | Получить URL загрузки |
 | `bot.upload_file(type, path, name, mime)` | Загрузить файл (двухшаговый процесс) |
@@ -122,13 +127,14 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 - Используйте `send_text_to_chat(chat_id, ...)` / `send_message_to_chat(chat_id, ...)`, когда у вас уже есть ID диалога или группы.
 - Используйте `send_text_to_user(user_id, ...)` / `send_message_to_user(user_id, ...)`, когда у вас есть только глобальный MAX `user_id` пользователя.
 
-## Известные ограничения MAX
+## Поведение MAX, подтверждённое live-тестом
 
-На 27 апреля 2026 года библиотека умеет отправлять эти запросы, но live-поведение на стороне MAX пока расходится с ожиданиями:
+На 20 мая 2026 года полный прогон `examples/live_api_test.rs` завершился с `89 PASS / 0 FAIL / 8 SKIP`. Пропущенные шаги — это явный выбор тестера или текущие ограничения платформы MAX:
 
-- `Button::RequestContact` задокументирована в MAX, но в live-тестах приходило contact-вложение с пустыми `contact_id` и `vcf_phone`. Кнопка отправляется корректно, но возврат номера телефона пользователя на стороне MAX пока не подтверждён.
-- `Button::RequestGeoLocation` доставляет структурированное `Attachment::Location` с `latitude` и `longitude`; в клиенте та же отправленная позиция может отображаться как карточка Яндекс Карт.
-- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` получает успешный ответ API, но live-тесты MAX не подтвердили видимый индикатор набора текста в клиенте.
+- `Button::RequestContact` live-подтверждён: приходит `vcf_info`, валидный `hash` и `max_info`; `ContactPayload::validate_hash(token)` проверяет VCF hash. Некоторые клиенты могут не заполнять старое shortcut-поле `vcf_phone`, поэтому используйте `phones_from_vcf()` как fallback.
+- `Button::RequestGeoLocation` live-подтверждён: приходит структурированное `Attachment::Location` с `latitude` и `longitude`; в клиенте та же отправленная позиция может отображаться как карточка Яндекс Карт.
+- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` live-подтверждён: индикатор набора текста виден в групповом чате.
+- `Button::chat(...)` смоделирован по публичной схеме MAX, но текущие live-запросы `POST /messages` с документированным JSON `chat`-кнопки возвращают `400 Can't deserialize body`. Live harness помечает эту opt-in проверку как ограничение платформы, печатает исходящий JSON и умеет ловить raw `message_chat_created`, если у вас уже есть рабочая chat-кнопка.
 - `bot.set_my_commands` оставлен как экспериментальный helper, но в публичной REST-документации MAX нет write-эндпоинта для команд бота, а live-запросы `POST /me/commands` возвращают `404 Path /me/commands is not recognized`.
 
 ## Фильтры диспетчера
@@ -140,6 +146,9 @@ dp.on_edited_message(handler);                // редактирование
 dp.on_callback(handler);                      // любой callback
 dp.on_callback_payload("btn:ok", handler);    // конкретный payload
 dp.on_bot_started(handler);                   // первый запуск бота
+dp.on_bot_stopped(handler);                   // пользователь остановил бота
+dp.on_dialog_muted(handler);                  // диалог заглушён
+dp.on_message_chat_created(handler);          // chat-кнопка создала чат
 dp.on_update(
     Filter::message() & Filter::chat(chat_id) & Filter::text_contains("ping"),
     handler,
@@ -290,21 +299,27 @@ cargo run --example live_api_test
 
 В начале он спрашивает прямо в терминале:
 
+- транспорт updates: `long_polling` или `webhook`
 - токен бота
 - URL бота для тестера
 - необязательные webhook URL и secret
+- локальный адрес для приёма webhook, если выбран транспорт `webhook`
 - необязательный путь к локальному файлу для `upload_file`
 - необязательные пути к изображению, видео и аудио для проверки media helpers
 - HTTP timeout, polling timeout и задержку между запросами
 
 Дальше harness пошагово ведёт тестера по действиям в клиенте Max и фиксирует `PASS` / `FAIL` / `SKIP` по реальным API-вызовам. Он заранее очищает backlog long polling, ставит небольшие паузы между запросами и требует явного подтверждения перед разрушительными или неоткатываемыми шагами, например:
 
+- временное отключение и восстановление webhook перед long-polling ожиданиями
 - `set_my_commands`
 - `delete_chat`
 - `leave_chat`
 - видимое изменение title у группы
+- `remove_member_with_options(..., block=true)`
 
-Текущий прогон также проверяет неясное поведение MAX вокруг кнопок запроса контакта/геопозиции, message-кнопок, `open_app`, `clipboard`, sender actions, metadata загруженного видео, выборочного получения участников и временного изменения admin-прав.
+Long polling и webhooks в MAX нельзя использовать одновременно. В режиме `long_polling` harness проверяет активные webhook subscriptions, может временно отписать их и восстанавливает в конце с webhook secret, введённым при старте. В режиме `webhook` он запускает минимальный локальный receiver, чтобы ручные ожидания читали входящие webhook POST вместо `GET /updates`.
+
+Текущий прогон проверяет кнопки запроса контакта/геопозиции, contact hash, text markup, message-кнопки, chat-кнопки, `open_app`, `clipboard`, sender actions, filtered polling, metadata загруженного видео, выборочное получение участников, временное изменение admin-прав, настройки удаления участников и subscribe/unsubscribe/restore для webhook.
 
 ## Лицензия
 

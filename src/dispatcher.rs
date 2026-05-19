@@ -185,6 +185,30 @@ pub enum Filter {
     BotStarted,
     /// Fires when the bot is added to a chat.
     BotAdded,
+    /// Fires when the bot is removed from a chat.
+    BotRemoved,
+    /// Fires when a user stops the bot.
+    BotStopped,
+    /// Fires when a message is removed.
+    MessageRemoved,
+    /// Fires when a nullable message-edit event is received without a message.
+    MessageEditedMissing,
+    /// Fires when a chat title changes.
+    ChatTitleChanged,
+    /// Fires when a user is added to a chat.
+    UserAdded,
+    /// Fires when a user is removed from a chat.
+    UserRemoved,
+    /// Fires when a user clears the bot dialog.
+    DialogCleared,
+    /// Fires when a user mutes the bot dialog.
+    DialogMuted,
+    /// Fires when a user unmutes the bot dialog.
+    DialogUnmuted,
+    /// Fires when a user removes the bot dialog.
+    DialogRemoved,
+    /// Fires when a chat is created through a chat button.
+    MessageChatCreated,
     /// Fires when a new message arrives whose text starts with this command.
     Command(String),
     /// Fires when the callback payload equals this string.
@@ -242,6 +266,54 @@ impl Filter {
 
     pub fn bot_added() -> Self {
         Self::BotAdded
+    }
+
+    pub fn bot_removed() -> Self {
+        Self::BotRemoved
+    }
+
+    pub fn bot_stopped() -> Self {
+        Self::BotStopped
+    }
+
+    pub fn message_removed() -> Self {
+        Self::MessageRemoved
+    }
+
+    pub fn message_edited_missing() -> Self {
+        Self::MessageEditedMissing
+    }
+
+    pub fn chat_title_changed() -> Self {
+        Self::ChatTitleChanged
+    }
+
+    pub fn user_added() -> Self {
+        Self::UserAdded
+    }
+
+    pub fn user_removed() -> Self {
+        Self::UserRemoved
+    }
+
+    pub fn dialog_cleared() -> Self {
+        Self::DialogCleared
+    }
+
+    pub fn dialog_muted() -> Self {
+        Self::DialogMuted
+    }
+
+    pub fn dialog_unmuted() -> Self {
+        Self::DialogUnmuted
+    }
+
+    pub fn dialog_removed() -> Self {
+        Self::DialogRemoved
+    }
+
+    pub fn message_chat_created() -> Self {
+        Self::MessageChatCreated
     }
 
     pub fn command(command: impl Into<String>) -> Self {
@@ -347,6 +419,18 @@ impl Filter {
             Self::Callback => matches!(update, Update::MessageCallback { .. }),
             Self::BotStarted => matches!(update, Update::BotStarted { .. }),
             Self::BotAdded => matches!(update, Update::BotAdded { .. }),
+            Self::BotRemoved => matches!(update, Update::BotRemoved { .. }),
+            Self::BotStopped => matches!(update, Update::BotStopped { .. }),
+            Self::MessageRemoved => matches!(update, Update::MessageRemoved { .. }),
+            Self::MessageEditedMissing => matches!(update, Update::MessageEditedMissing { .. }),
+            Self::ChatTitleChanged => matches!(update, Update::ChatTitleChanged { .. }),
+            Self::UserAdded => matches!(update, Update::UserAdded { .. }),
+            Self::UserRemoved => matches!(update, Update::UserRemoved { .. }),
+            Self::DialogCleared => matches!(update, Update::DialogCleared { .. }),
+            Self::DialogMuted => matches!(update, Update::DialogMuted { .. }),
+            Self::DialogUnmuted => matches!(update, Update::DialogUnmuted { .. }),
+            Self::DialogRemoved => matches!(update, Update::DialogRemoved { .. }),
+            Self::MessageChatCreated => matches!(update, Update::MessageChatCreated { .. }),
             Self::Command(cmd) => {
                 if let Update::MessageCreated { message, .. } = update {
                     message
@@ -543,6 +627,123 @@ impl Dispatcher {
         F: Future<Output = Result<()>> + Send + 'static,
     {
         self.on_update(Filter::BotStarted, handler)
+    }
+
+    /// Register a handler that fires when the bot is added to a chat.
+    pub fn on_bot_added<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::BotAdded, handler)
+    }
+
+    /// Register a handler that fires when the bot is removed from a chat.
+    pub fn on_bot_removed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::BotRemoved, handler)
+    }
+
+    /// Register a handler that fires when a user stops the bot.
+    pub fn on_bot_stopped<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::BotStopped, handler)
+    }
+
+    /// Register a handler for removed messages.
+    pub fn on_message_removed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::MessageRemoved, handler)
+    }
+
+    /// Register a handler for edited-message updates without a message payload.
+    pub fn on_message_edited_missing<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::MessageEditedMissing, handler)
+    }
+
+    /// Register a handler for chat title changes.
+    pub fn on_chat_title_changed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::ChatTitleChanged, handler)
+    }
+
+    /// Register a handler for user-added updates.
+    pub fn on_user_added<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::UserAdded, handler)
+    }
+
+    /// Register a handler for user-removed updates.
+    pub fn on_user_removed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::UserRemoved, handler)
+    }
+
+    /// Register a handler for dialog-cleared updates.
+    pub fn on_dialog_cleared<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::DialogCleared, handler)
+    }
+
+    /// Register a handler for dialog-muted updates.
+    pub fn on_dialog_muted<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::DialogMuted, handler)
+    }
+
+    /// Register a handler for dialog-unmuted updates.
+    pub fn on_dialog_unmuted<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::DialogUnmuted, handler)
+    }
+
+    /// Register a handler for dialog-removed updates.
+    pub fn on_dialog_removed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::DialogRemoved, handler)
+    }
+
+    /// Register a handler for chats created through chat buttons.
+    pub fn on_message_chat_created<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::MessageChatCreated, handler)
     }
 
     /// Register a handler for a specific bot command (e.g. `"/start"`).

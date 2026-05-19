@@ -6,9 +6,9 @@ use crate::{
     dispatcher::Filter,
     types::{
         AnswerCallbackBody, Attachment, AttachmentKind, Button, Callback, ChatAdminPermission,
-        ChatMember, ChatStatus, ChatType, KeyboardPayload, Message, MessageBody, MessageFormat,
-        NewAttachment, NewMessageBody, PhotoToken, Recipient, SenderAction, SubscribeBody, Update,
-        UploadType, User,
+        ChatMember, ChatStatus, ChatType, KeyboardPayload, MarkupElement, Message, MessageBody,
+        MessageFormat, NewAttachment, NewMessageBody, PhotoToken, Recipient, SenderAction,
+        SubscribeBody, Update, UploadType, User,
     },
 };
 use std::collections::BTreeMap;
@@ -50,6 +50,7 @@ fn make_message(chat_id: i64, text: &str) -> Message {
             seq: 1,
             text: Some(text.into()),
             attachments: None,
+            markup: None,
         },
         stat: None,
         url: None,
@@ -131,6 +132,87 @@ fn test_update_bot_started_roundtrip() {
 
     let update: Update = serde_json::from_str(json).unwrap();
     assert!(matches!(update, Update::BotStarted { chat_id: 99, .. }));
+}
+
+#[test]
+fn test_update_message_edited_missing_payload() {
+    let json = r#"{
+            "update_type": "message_edited",
+            "timestamp": 1700000000,
+            "message": null
+        }"#;
+
+    let update: Update = serde_json::from_str(json).unwrap();
+    assert!(matches!(
+        update,
+        Update::MessageEditedMissing {
+            timestamp: 1_700_000_000
+        }
+    ));
+}
+
+#[test]
+fn test_update_new_dialog_and_chat_button_variants() {
+    let bot_stopped = r#"{
+            "update_type": "bot_stopped",
+            "timestamp": 1700000000,
+            "chat_id": 42,
+            "user": {"user_id": 7, "name": "Alice"},
+            "user_locale": "en-US"
+        }"#;
+    let update: Update = serde_json::from_str(bot_stopped).unwrap();
+    assert!(matches!(
+        update,
+        Update::BotStopped {
+            chat_id: 42,
+            user_locale: Some(_),
+            ..
+        }
+    ));
+
+    let dialog_muted = r#"{
+            "update_type": "dialog_muted",
+            "timestamp": 1700000001,
+            "chat_id": 42,
+            "user": {"user_id": 7, "name": "Alice"},
+            "muted_until": 1700000100
+        }"#;
+    let update: Update = serde_json::from_str(dialog_muted).unwrap();
+    assert!(matches!(
+        update,
+        Update::DialogMuted {
+            chat_id: 42,
+            muted_until: 1_700_000_100,
+            ..
+        }
+    ));
+
+    let chat_created = r#"{
+            "update_type": "message_chat_created",
+            "timestamp": 1700000002,
+            "message_id": "mid_1",
+            "start_payload": "payload",
+            "chat": {
+                "chat_id": 99,
+                "type": "chat",
+                "status": "active",
+                "title": "Created",
+                "icon": null,
+                "last_event_time": 1700000002,
+                "participants_count": 2,
+                "is_public": false,
+                "description": null
+            }
+        }"#;
+    let update: Update = serde_json::from_str(chat_created).unwrap();
+    assert!(matches!(
+        update,
+        Update::MessageChatCreated {
+            message_id,
+            start_payload: Some(_),
+            ..
+        } if message_id == "mid_1"
+    ));
 }
 
 #[test]
@@ -349,6 +431,23 @@ fn test_button_clipboard_serialization() {
     let json = serde_json::to_value(&btn).unwrap();
     assert_eq!(json["type"], "clipboard");
     assert_eq!(json["payload"], "payload");
+}
+
+#[test]
+fn test_button_chat_serialization() {
+    let btn = Button::chat_full(
+        "Discuss",
+        "Message discussion",
+        Some("Chat description".into()),
+        Some("payload".into()),
+        Some(123),
+    );
+    let json = serde_json::to_value(&btn).unwrap();
+    assert_eq!(json["type"], "chat");
+    assert_eq!(json["chat_title"], "Message discussion");
+    assert_eq!(json["chat_description"], "Chat description");
+    assert_eq!(json["start_payload"], "payload");
+    assert_eq!(json["uuid"], 123);
 }
 
 #[test]
@@ -580,6 +679,39 @@ fn test_attachment_inline_keyboard_round_trip() {
     let json = serde_json::to_string(&original).unwrap();
     assert!(json.contains("inline_keyboard"));
     assert!(json.contains("click:1"));
+}
+
+#[test]
+fn test_markup_quote_deserialization() {
+    let json = r#"{
+        "mid": "mid_1",
+        "seq": 1,
+        "text": "quoted",
+        "attachments": null,
+        "markup": [{"type": "quote", "from": 0, "length": 6}]
+    }"#;
+
+    let body: MessageBody = serde_json::from_str(json).unwrap();
+    assert!(matches!(
+        body.markup.as_deref(),
+        Some([MarkupElement::Quote { from: 0, length: 6 }])
+    ));
+}
+
+#[test]
+fn test_contact_payload_hash_and_vcf_phone_helpers() {
+    let payload: crate::types::ContactPayload = serde_json::from_str(
+        r#"{
+            "vcf_info": "BEGIN:VCARD\nTEL;TYPE=CELL:+1 (234) 567-890\nEND:VCARD",
+            "hash": "ee3d82750cc421d596d2bac3350e80c763406417768bbba9292ed95463139807",
+            "max_info": {"user_id": 7, "name": "Alice"}
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(payload.phones_from_vcf(), vec!["+1234567890".to_string()]);
+    assert_eq!(payload.max_info.as_ref().map(|user| user.user_id), Some(7));
+    assert!(payload.validate_hash("secret"));
 }
 
 #[test]

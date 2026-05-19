@@ -18,7 +18,8 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 - ✅ Long polling and optional **Webhook** server via [axum](https://github.com/tokio-rs/axum)
 - ✅ Forward-compatible typed events (`Update`, `Message`, `Callback`, unknown update fallback)
 - ✅ `Dispatcher` with fluent handler registration, composable filters, startup hooks and scheduled tasks
-- ✅ Inline keyboards (`callback`, `link`, `message`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ Inline keyboards (`callback`, `link`, `message`, `chat`, `open_app`, `clipboard`, `request_contact`, `request_geo_location`)
+- ✅ Message text markup parsing, including quote markup and unknown markup fallbacks
 - ✅ File uploads — multipart, image photo-token payloads, correct token flow for video/audio, send helpers for image/video/audio/file
 - ✅ Markdown / HTML message formatting
 - ✅ Webhook secret verification (`X-Max-Bot-Api-Secret`)
@@ -28,11 +29,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = "2.0.0"
+maxoxide = "2.1.0"
 tokio    = { version = "1", features = ["full"] }
 
 # Enable the built-in axum webhook server:
-# maxoxide = { version = "2.0.0", features = ["webhook"] }
+# maxoxide = { version = "2.1.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -76,6 +77,7 @@ MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 | Method | Description |
 |--------|-------------|
 | `bot.get_me()` | Bot info |
+| `bot.edit_my_info(body)` | Edit bot profile, commands, or avatar via `PATCH /me` |
 | `bot.send_text_to_chat(chat_id, text)` | Send plain text to a dialog/group/channel by `chat_id` |
 | `bot.send_text_to_user(user_id, text)` | Send plain text to a user by global MAX `user_id` |
 | `bot.send_markdown_to_chat(chat_id, text)` | Send Markdown to a dialog/group/channel by `chat_id` |
@@ -96,12 +98,15 @@ MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 | `bot.get_members_by_ids(chat_id, user_ids)` | Get selected members |
 | `bot.add_members(…)` | Add members |
 | `bot.remove_member(…)` | Remove a member |
+| `bot.remove_member_with_options(…, options)` | Remove a member with options such as `block=true` |
 | `bot.get_admins(chat_id)` | List admins |
 | `bot.add_admins(chat_id, admins)` | Grant admin rights |
 | `bot.remove_admin(chat_id, user_id)` | Revoke admin rights |
 | `bot.pin_message(…)` | Pin a message |
 | `bot.unpin_message(…)` | Unpin |
 | `bot.send_sender_action(chat_id, action)` | Send a typed sender action |
+| `bot.get_updates_with_types(…, types)` | Long polling limited to selected update types |
+| `bot.get_updates_raw_with_types(…, types)` | Raw JSON long polling limited to selected update types |
 | `bot.subscribe(body)` | Register a webhook |
 | `bot.get_upload_url(type)` | Get upload URL |
 | `bot.upload_file(type, path, name, mime)` | Full two-step file upload |
@@ -122,13 +127,14 @@ These two IDs are different and should not be used interchangeably:
 - Use `send_text_to_chat(chat_id, ...)` / `send_message_to_chat(chat_id, ...)` when you already know the dialog or group.
 - Use `send_text_to_user(user_id, ...)` / `send_message_to_user(user_id, ...)` when you only know the user's global MAX ID.
 
-## Known MAX platform gaps
+## Live-tested MAX behavior
 
-As of April 27, 2026, the crate can send these requests, but live behavior on the MAX side is still inconsistent:
+As of May 20, 2026, a full `examples/live_api_test.rs` run completed with `89 PASS / 0 FAIL / 8 SKIP`. The skipped steps are either explicit tester choices or current MAX platform limitations:
 
-- `Button::RequestContact` is documented by MAX, but live tests received a contact attachment with empty `contact_id` and `vcf_phone`. Sending the button works; receiving the user's phone number is not confirmed on the MAX side.
-- `Button::RequestGeoLocation` delivers a structured `Attachment::Location` with `latitude` and `longitude`; the client can render the same shared position as a Yandex Maps card.
-- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` returns success from the API, but live MAX tests did not confirm a visible typing indicator in the client.
+- `Button::RequestContact` is live-confirmed to deliver `vcf_info`, a valid `hash`, and `max_info`; `ContactPayload::validate_hash(token)` verifies the VCF hash. Some clients may still omit the legacy `vcf_phone` shortcut, so use `phones_from_vcf()` as a fallback.
+- `Button::RequestGeoLocation` is live-confirmed to deliver a structured `Attachment::Location` with `latitude` and `longitude`; the client can render the same shared position as a Yandex Maps card.
+- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` is live-confirmed to show the typing indicator in group chats.
+- `Button::chat(...)` is modeled after the public MAX schema, but current live `POST /messages` requests with the documented `chat` button JSON return `400 Can't deserialize body`. The live harness treats this opt-in probe as a platform limitation, prints the outgoing JSON, and can capture raw `message_chat_created` updates if you already have a working chat button.
 - `bot.set_my_commands` is kept as an experimental helper, but the public MAX REST docs do not list a write endpoint for bot commands, and live `POST /me/commands` requests return `404 Path /me/commands is not recognized`.
 
 ## Dispatcher filters
@@ -140,6 +146,9 @@ dp.on_edited_message(handler);               // edited message
 dp.on_callback(handler);                     // any callback button
 dp.on_callback_payload("btn:ok", handler);   // specific payload
 dp.on_bot_started(handler);                  // user starts bot
+dp.on_bot_stopped(handler);                  // user stops bot
+dp.on_dialog_muted(handler);                 // dialog muted
+dp.on_message_chat_created(handler);         // chat button created a chat
 dp.on_update(
     Filter::message() & Filter::chat(chat_id) & Filter::text_contains("ping"),
     handler,
@@ -288,21 +297,27 @@ cargo run --example live_api_test
 
 At startup it asks in the terminal for:
 
+- update transport: `long_polling` or `webhook`
 - bot token
 - bot URL for the tester
 - optional webhook URL and secret
+- local webhook listen address when `webhook` transport is selected
 - optional local file path for `upload_file`
 - optional image, video and audio paths for media helper checks
 - HTTP timeout, polling timeout and delay between requests
 
 The harness then walks the tester through Max-client actions and records `PASS` / `FAIL` / `SKIP` for real API calls. It uses small delays between requests, drains the long-poll backlog before the run, and asks for explicit confirmation before destructive or non-reversible steps such as:
 
+- temporary webhook unsubscribe/restore before long-polling waits
 - `set_my_commands`
 - `delete_chat`
 - `leave_chat`
 - visible group title edits
+- `remove_member_with_options(..., block=true)`
 
-The current run also probes the unclear MAX behavior around contact/location request buttons, message buttons, `open_app`, `clipboard`, sender actions, uploaded video metadata, selected members, and temporary admin rights changes.
+Long polling and webhooks cannot be active at the same time on MAX. In `long_polling` mode the harness checks active webhook subscriptions, can temporarily unsubscribe them, and restores them at the end using the webhook secret entered during startup. In `webhook` mode it starts a minimal local receiver so manual waits consume incoming webhook POSTs instead of `GET /updates`.
+
+The current run probes contact/location request buttons, contact hashes, text markup, message buttons, chat buttons, `open_app`, `clipboard`, sender actions, filtered polling, uploaded video metadata, selected members, temporary admin rights changes, member removal options, and webhook subscribe/unsubscribe/restore behavior.
 
 ## License
 

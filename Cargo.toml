@@ -1,6 +1,6 @@
 [package]
 name = "maxoxide"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 description = "Async Rust library for the Max messenger Bot API"
 license = "MIT"
@@ -21,6 +21,8 @@ thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
 regex = "1"
+hmac = "0.12"
+sha2 = "0.10"
 
 # Optional webhook deps (feature = "webhook")
 axum           = { version = "0.8", optional = true }

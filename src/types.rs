@@ -1,10 +1,12 @@
 use std::{collections::BTreeMap, fmt};
 
+use hmac::{Hmac, Mac};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{DeserializeOwned, Error as DeError},
     ser::SerializeStruct,
 };
+use sha2::Sha256;
 
 // ────────────────────────────────────────────────
 // String enums with unknown-value preservation
@@ -166,6 +168,7 @@ pub enum ChatStatus {
     Removed,
     Left,
     Closed,
+    Suspended,
     Unknown(String),
 }
 
@@ -176,6 +179,7 @@ impl ChatStatus {
             Self::Removed => "removed",
             Self::Left => "left",
             Self::Closed => "closed",
+            Self::Suspended => "suspended",
             Self::Unknown(value) => value.as_str(),
         }
     }
@@ -200,6 +204,7 @@ impl<'de> Deserialize<'de> for ChatStatus {
             "removed" => Self::Removed,
             "left" => Self::Left,
             "closed" => Self::Closed,
+            "suspended" => Self::Suspended,
             _ => Self::Unknown(value),
         })
     }
@@ -252,6 +257,23 @@ pub struct EditChatBody {
     pub pin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<bool>,
+}
+
+/// Body for PATCH /me.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EditMyInfoBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<BotCommand>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photo: Option<ImageAttachmentPayload>,
 }
 
 // ────────────────────────────────────────────────
@@ -369,11 +391,274 @@ pub struct MessageBody {
     pub text: Option<String>,
     #[serde(default, deserialize_with = "deserialize_attachments_lossy")]
     pub attachments: Option<Vec<Attachment>>,
+    #[serde(default, deserialize_with = "deserialize_markup_lossy")]
+    pub markup: Option<Vec<MarkupElement>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageStat {
     pub views: Option<i32>,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum MarkupElement {
+    Strong {
+        from: i32,
+        length: i32,
+    },
+    Emphasized {
+        from: i32,
+        length: i32,
+    },
+    Monospaced {
+        from: i32,
+        length: i32,
+    },
+    Link {
+        from: i32,
+        length: i32,
+        url: String,
+    },
+    Strikethrough {
+        from: i32,
+        length: i32,
+    },
+    Underline {
+        from: i32,
+        length: i32,
+    },
+    UserMention {
+        from: i32,
+        length: i32,
+        user_link: Option<String>,
+        user_id: Option<i64>,
+    },
+    Heading {
+        from: i32,
+        length: i32,
+    },
+    Highlighted {
+        from: i32,
+        length: i32,
+    },
+    Quote {
+        from: i32,
+        length: i32,
+    },
+    Unknown {
+        r#type: String,
+        from: Option<i32>,
+        length: Option<i32>,
+        raw: serde_json::Value,
+    },
+}
+
+impl MarkupElement {
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::Strong { .. } => "strong",
+            Self::Emphasized { .. } => "emphasized",
+            Self::Monospaced { .. } => "monospaced",
+            Self::Link { .. } => "link",
+            Self::Strikethrough { .. } => "strikethrough",
+            Self::Underline { .. } => "underline",
+            Self::UserMention { .. } => "user_mention",
+            Self::Heading { .. } => "heading",
+            Self::Highlighted { .. } => "highlighted",
+            Self::Quote { .. } => "quote",
+            Self::Unknown { r#type, .. } => r#type.as_str(),
+        }
+    }
+}
+
+impl Serialize for MarkupElement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct BaseMarkup<'a> {
+            #[serde(rename = "type")]
+            markup_type: &'a str,
+            from: i32,
+            length: i32,
+        }
+
+        #[derive(Serialize)]
+        struct LinkMarkup<'a> {
+            #[serde(rename = "type")]
+            markup_type: &'a str,
+            from: i32,
+            length: i32,
+            url: &'a str,
+        }
+
+        #[derive(Serialize)]
+        struct UserMentionMarkup<'a> {
+            #[serde(rename = "type")]
+            markup_type: &'a str,
+            from: i32,
+            length: i32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            user_link: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            user_id: Option<i64>,
+        }
+
+        match self {
+            Self::Strong { from, length }
+            | Self::Emphasized { from, length }
+            | Self::Monospaced { from, length }
+            | Self::Strikethrough { from, length }
+            | Self::Underline { from, length }
+            | Self::Heading { from, length }
+            | Self::Highlighted { from, length }
+            | Self::Quote { from, length } => BaseMarkup {
+                markup_type: self.kind(),
+                from: *from,
+                length: *length,
+            }
+            .serialize(serializer),
+            Self::Link { from, length, url } => LinkMarkup {
+                markup_type: "link",
+                from: *from,
+                length: *length,
+                url,
+            }
+            .serialize(serializer),
+            Self::UserMention {
+                from,
+                length,
+                user_link,
+                user_id,
+            } => UserMentionMarkup {
+                markup_type: "user_mention",
+                from: *from,
+                length: *length,
+                user_link: user_link.as_deref(),
+                user_id: *user_id,
+            }
+            .serialize(serializer),
+            Self::Unknown { raw, .. } => raw.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MarkupElement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let markup_type = raw
+            .get("type")
+            .and_then(|value| value.as_str())
+            .map(String::from)
+            .ok_or_else(|| D::Error::missing_field("type"))?;
+        let from = raw
+            .get("from")
+            .and_then(|value| value.as_i64())
+            .and_then(|value| i32::try_from(value).ok());
+        let length = raw
+            .get("length")
+            .and_then(|value| value.as_i64())
+            .and_then(|value| i32::try_from(value).ok());
+
+        let Some(from) = from else {
+            return Ok(Self::Unknown {
+                r#type: markup_type,
+                from,
+                length,
+                raw,
+            });
+        };
+        let Some(length) = length else {
+            return Ok(Self::Unknown {
+                r#type: markup_type,
+                from: Some(from),
+                length,
+                raw,
+            });
+        };
+
+        Ok(match markup_type.as_str() {
+            "strong" => Self::Strong { from, length },
+            "emphasized" => Self::Emphasized { from, length },
+            "monospaced" => Self::Monospaced { from, length },
+            "link" => {
+                let Some(url) = raw.get("url").and_then(|value| value.as_str()) else {
+                    return Ok(Self::Unknown {
+                        r#type: markup_type,
+                        from: Some(from),
+                        length: Some(length),
+                        raw,
+                    });
+                };
+                Self::Link {
+                    from,
+                    length,
+                    url: url.to_string(),
+                }
+            }
+            "strikethrough" => Self::Strikethrough { from, length },
+            "underline" => Self::Underline { from, length },
+            "user_mention" => Self::UserMention {
+                from,
+                length,
+                user_link: raw
+                    .get("user_link")
+                    .and_then(|value| value.as_str())
+                    .map(String::from),
+                user_id: raw.get("user_id").and_then(|value| value.as_i64()),
+            },
+            "heading" => Self::Heading { from, length },
+            "highlighted" => Self::Highlighted { from, length },
+            "quote" => Self::Quote { from, length },
+            _ => Self::Unknown {
+                r#type: markup_type,
+                from: Some(from),
+                length: Some(length),
+                raw,
+            },
+        })
+    }
+}
+
+fn deserialize_markup_lossy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<MarkupElement>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?;
+
+    Ok(raw.map(|items| {
+        items
+            .into_iter()
+            .map(|value| {
+                serde_json::from_value::<MarkupElement>(value.clone()).unwrap_or_else(|_| {
+                    MarkupElement::Unknown {
+                        r#type: value
+                            .get("type")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        from: value
+                            .get("from")
+                            .and_then(|value| value.as_i64())
+                            .and_then(|value| i32::try_from(value).ok()),
+                        length: value
+                            .get("length")
+                            .and_then(|value| value.as_i64())
+                            .and_then(|value| i32::try_from(value).ok()),
+                        raw: value,
+                    }
+                })
+            })
+            .collect()
+    }))
 }
 
 fn deserialize_attachments_lossy<'de, D>(
@@ -449,6 +734,12 @@ pub enum Attachment {
     Contact {
         payload: ContactPayload,
     },
+    Share {
+        payload: SharePayload,
+    },
+    Data {
+        data: String,
+    },
     Unknown {
         r#type: String,
         payload: Option<serde_json::Value>,
@@ -467,6 +758,8 @@ impl Attachment {
             Self::InlineKeyboard { .. } => AttachmentKind::InlineKeyboard,
             Self::Location { .. } => AttachmentKind::Location,
             Self::Contact { .. } => AttachmentKind::Contact,
+            Self::Share { .. } => AttachmentKind::Share,
+            Self::Data { .. } => AttachmentKind::Data,
             Self::Unknown { .. } => AttachmentKind::Unknown,
         }
     }
@@ -488,6 +781,8 @@ impl Serialize for Attachment {
             }
             Self::Location { payload } => serialize_attachment(serializer, "location", payload),
             Self::Contact { payload } => serialize_attachment(serializer, "contact", payload),
+            Self::Share { payload } => serialize_share_attachment(serializer, payload),
+            Self::Data { data } => serialize_data_attachment(serializer, data),
             Self::Unknown { raw, .. } => raw.serialize(serializer),
         }
     }
@@ -505,6 +800,49 @@ where
     let mut state = serializer.serialize_struct("Attachment", 2)?;
     state.serialize_field("type", attachment_type)?;
     state.serialize_field("payload", payload)?;
+    state.end()
+}
+
+fn serialize_share_attachment<S>(serializer: S, payload: &SharePayload) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    #[derive(Serialize)]
+    struct ShareAttachmentPayload<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        token: Option<&'a str>,
+    }
+
+    let mut state = serializer.serialize_struct("Attachment", 5)?;
+    state.serialize_field("type", "share")?;
+    state.serialize_field(
+        "payload",
+        &ShareAttachmentPayload {
+            url: payload.url.as_deref(),
+            token: payload.token.as_deref(),
+        },
+    )?;
+    if let Some(title) = &payload.title {
+        state.serialize_field("title", title)?;
+    }
+    if let Some(description) = &payload.description {
+        state.serialize_field("description", description)?;
+    }
+    if let Some(image_url) = &payload.image_url {
+        state.serialize_field("image_url", image_url)?;
+    }
+    state.end()
+}
+
+fn serialize_data_attachment<S>(serializer: S, data: &str) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut state = serializer.serialize_struct("Attachment", 2)?;
+    state.serialize_field("type", "data")?;
+    state.serialize_field("data", data)?;
     state.end()
 }
 
@@ -544,6 +882,19 @@ impl<'de> Deserialize<'de> for Attachment {
             "contact" => Ok(Self::Contact {
                 payload: deserialize_attachment_payload(&raw)?,
             }),
+            "share" => Ok(Self::Share {
+                payload: deserialize_attachment_payload(&raw)?,
+            }),
+            "data" => {
+                #[derive(Deserialize)]
+                struct DataPayload {
+                    data: String,
+                }
+
+                Ok(Self::Data {
+                    data: deserialize_attachment_payload::<DataPayload, D::Error>(&raw)?.data,
+                })
+            }
             _ => Ok(Self::Unknown {
                 r#type: attachment_type.to_string(),
                 payload: raw.get("payload").cloned(),
@@ -558,9 +909,35 @@ where
     T: DeserializeOwned,
     E: DeError,
 {
-    let value = raw.get("payload").cloned().unwrap_or_else(|| raw.clone());
+    let value = merged_attachment_payload(raw);
 
     serde_json::from_value(value).map_err(E::custom)
+}
+
+fn merged_attachment_payload(raw: &serde_json::Value) -> serde_json::Value {
+    let mut value = raw
+        .get("payload")
+        .cloned()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let Some(raw_object) = raw.as_object() else {
+        return value;
+    };
+
+    let serde_json::Value::Object(value_object) = &mut value else {
+        return value;
+    };
+
+    for (key, field_value) in raw_object {
+        if key != "type" && key != "payload" {
+            value_object
+                .entry(key.clone())
+                .or_insert_with(|| field_value.clone());
+        }
+    }
+
+    value
 }
 
 #[non_exhaustive]
@@ -574,6 +951,8 @@ pub enum AttachmentKind {
     InlineKeyboard,
     Location,
     Contact,
+    Share,
+    Data,
     Unknown,
 }
 
@@ -582,6 +961,16 @@ pub struct MediaPayload {
     pub url: Option<String>,
     pub token: Option<String>,
     pub photo_id: Option<i64>,
+    pub thumbnail: Option<VideoThumbnail>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub duration: Option<i32>,
+    pub transcription: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VideoThumbnail {
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -612,6 +1001,86 @@ pub struct ContactPayload {
     pub contact_id: Option<i64>,
     pub vcf_info: Option<String>,
     pub vcf_phone: Option<String>,
+    pub hash: Option<String>,
+    #[serde(alias = "tam_info")]
+    pub max_info: Option<User>,
+}
+
+impl ContactPayload {
+    /// Validates that `hash` matches `vcf_info` for the current bot token.
+    pub fn validate_hash(&self, access_token: &str) -> bool {
+        let Some(hash) = self.hash.as_deref().filter(|value| !value.is_empty()) else {
+            return false;
+        };
+        let Some(vcf_info) = self.vcf_info.as_deref().filter(|value| !value.is_empty()) else {
+            return false;
+        };
+        if access_token.is_empty() {
+            return false;
+        }
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(access_token.as_bytes())
+            .expect("HMAC accepts keys of any size");
+        mac.update(vcf_info.as_bytes());
+        let expected = encode_hex(&mac.finalize().into_bytes());
+
+        constant_time_str_eq(hash, &expected)
+    }
+
+    /// Extracts phone numbers from the VCF payload returned by MAX.
+    pub fn phones_from_vcf(&self) -> Vec<String> {
+        let Some(vcf_info) = &self.vcf_info else {
+            return Vec::new();
+        };
+
+        vcf_info
+            .replace("\r\n", "\n")
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if !name.to_ascii_uppercase().starts_with("TEL") {
+                    return None;
+                }
+
+                let phone = value
+                    .chars()
+                    .filter(|ch| ch.is_ascii_digit() || *ch == '+')
+                    .collect::<String>();
+                (!phone.is_empty()).then_some(phone)
+            })
+            .collect()
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn constant_time_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        let left_byte = left.get(index).copied().unwrap_or_default();
+        let right_byte = right.get(index).copied().unwrap_or_default();
+        diff |= (left_byte ^ right_byte) as usize;
+    }
+    diff == 0
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SharePayload {
+    pub url: Option<String>,
+    pub token: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
 }
 
 // ────────────────────────────────────────────────
@@ -677,6 +1146,17 @@ pub enum Button {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         quick: Option<bool>,
+    },
+    /// Creates a new chat associated with the current message.
+    Chat {
+        text: String,
+        chat_title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_payload: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<i64>,
     },
 }
 
@@ -800,6 +1280,32 @@ impl Button {
         Self::RequestGeoLocation {
             text: text.into(),
             quick: None,
+        }
+    }
+
+    pub fn chat(text: impl Into<String>, chat_title: impl Into<String>) -> Self {
+        Self::Chat {
+            text: text.into(),
+            chat_title: chat_title.into(),
+            chat_description: None,
+            start_payload: None,
+            uuid: None,
+        }
+    }
+
+    pub fn chat_full(
+        text: impl Into<String>,
+        chat_title: impl Into<String>,
+        chat_description: Option<String>,
+        start_payload: Option<String>,
+        uuid: Option<i64>,
+    ) -> Self {
+        Self::Chat {
+            text: text.into(),
+            chat_title: chat_title.into(),
+            chat_description,
+            start_payload,
+            uuid,
         }
     }
 }
@@ -1098,6 +1604,8 @@ pub enum Update {
     MessageCreated { timestamp: i64, message: Message },
     /// A message was edited.
     MessageEdited { timestamp: i64, message: Message },
+    /// A message edit event without a message payload.
+    MessageEditedMissing { timestamp: i64 },
     /// A message was deleted.
     MessageRemoved {
         timestamp: i64,
@@ -1134,6 +1642,42 @@ pub enum Update {
         user: User,
         is_channel: Option<bool>,
     },
+    /// A user stopped the bot in a private dialog.
+    BotStopped {
+        timestamp: i64,
+        chat_id: i64,
+        user: User,
+        user_locale: Option<String>,
+    },
+    /// A user cleared the dialog history with the bot.
+    DialogCleared {
+        timestamp: i64,
+        chat_id: i64,
+        user: User,
+        user_locale: Option<String>,
+    },
+    /// A user muted the dialog with the bot.
+    DialogMuted {
+        timestamp: i64,
+        chat_id: i64,
+        user: User,
+        muted_until: i64,
+        user_locale: Option<String>,
+    },
+    /// A user unmuted the dialog with the bot.
+    DialogUnmuted {
+        timestamp: i64,
+        chat_id: i64,
+        user: User,
+        user_locale: Option<String>,
+    },
+    /// A user removed the dialog with the bot.
+    DialogRemoved {
+        timestamp: i64,
+        chat_id: i64,
+        user: User,
+        user_locale: Option<String>,
+    },
     /// A user joined a chat where the bot is a member.
     UserAdded {
         timestamp: i64,
@@ -1157,6 +1701,13 @@ pub enum Update {
         user: User,
         title: String,
     },
+    /// A chat was created through a `Button::Chat` button.
+    MessageChatCreated {
+        timestamp: i64,
+        chat: Chat,
+        message_id: String,
+        start_payload: Option<String>,
+    },
     /// A newer or currently unsupported update type.
     Unknown {
         update_type: Option<String>,
@@ -1171,14 +1722,21 @@ impl Update {
         match self {
             Self::MessageCreated { timestamp, .. }
             | Self::MessageEdited { timestamp, .. }
+            | Self::MessageEditedMissing { timestamp }
             | Self::MessageRemoved { timestamp, .. }
             | Self::MessageCallback { timestamp, .. }
             | Self::BotStarted { timestamp, .. }
             | Self::BotAdded { timestamp, .. }
             | Self::BotRemoved { timestamp, .. }
+            | Self::BotStopped { timestamp, .. }
+            | Self::DialogCleared { timestamp, .. }
+            | Self::DialogMuted { timestamp, .. }
+            | Self::DialogUnmuted { timestamp, .. }
+            | Self::DialogRemoved { timestamp, .. }
             | Self::UserAdded { timestamp, .. }
             | Self::UserRemoved { timestamp, .. }
-            | Self::ChatTitleChanged { timestamp, .. } => Some(*timestamp),
+            | Self::ChatTitleChanged { timestamp, .. }
+            | Self::MessageChatCreated { timestamp, .. } => Some(*timestamp),
             Self::Unknown { timestamp, .. } => *timestamp,
         }
     }
@@ -1192,14 +1750,21 @@ impl Update {
         match self {
             Self::MessageCreated { .. } => Some("message_created"),
             Self::MessageEdited { .. } => Some("message_edited"),
+            Self::MessageEditedMissing { .. } => Some("message_edited"),
             Self::MessageRemoved { .. } => Some("message_removed"),
             Self::MessageCallback { .. } => Some("message_callback"),
             Self::BotStarted { .. } => Some("bot_started"),
             Self::BotAdded { .. } => Some("bot_added"),
             Self::BotRemoved { .. } => Some("bot_removed"),
+            Self::BotStopped { .. } => Some("bot_stopped"),
+            Self::DialogCleared { .. } => Some("dialog_cleared"),
+            Self::DialogMuted { .. } => Some("dialog_muted"),
+            Self::DialogUnmuted { .. } => Some("dialog_unmuted"),
+            Self::DialogRemoved { .. } => Some("dialog_removed"),
             Self::UserAdded { .. } => Some("user_added"),
             Self::UserRemoved { .. } => Some("user_removed"),
             Self::ChatTitleChanged { .. } => Some("chat_title_changed"),
+            Self::MessageChatCreated { .. } => Some("message_chat_created"),
             Self::Unknown { update_type, .. } => update_type.as_deref(),
         }
     }
@@ -1252,6 +1817,13 @@ impl<'de> Deserialize<'de> for Update {
         }
 
         #[derive(Deserialize)]
+        struct MessageEditedUpdate {
+            timestamp: i64,
+            #[serde(default)]
+            message: Option<Message>,
+        }
+
+        #[derive(Deserialize)]
         struct MessageRemovedUpdate {
             timestamp: i64,
             message_id: String,
@@ -1290,6 +1862,25 @@ impl<'de> Deserialize<'de> for Update {
         }
 
         #[derive(Deserialize)]
+        struct UserDialogUpdate {
+            timestamp: i64,
+            chat_id: i64,
+            user: User,
+            #[serde(default)]
+            user_locale: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct DialogMutedUpdate {
+            timestamp: i64,
+            chat_id: i64,
+            user: User,
+            muted_until: i64,
+            #[serde(default)]
+            user_locale: Option<String>,
+        }
+
+        #[derive(Deserialize)]
         struct UserAddedUpdate {
             timestamp: i64,
             chat_id: i64,
@@ -1319,6 +1910,15 @@ impl<'de> Deserialize<'de> for Update {
             title: String,
         }
 
+        #[derive(Deserialize)]
+        struct MessageChatCreatedUpdate {
+            timestamp: i64,
+            chat: Chat,
+            message_id: String,
+            #[serde(default)]
+            start_payload: Option<String>,
+        }
+
         Ok(match kind {
             "message_created" => parse_update!(MessageUpdate, |wire: MessageUpdate| {
                 Self::MessageCreated {
@@ -1326,10 +1926,15 @@ impl<'de> Deserialize<'de> for Update {
                     message: wire.message,
                 }
             }),
-            "message_edited" => parse_update!(MessageUpdate, |wire: MessageUpdate| {
-                Self::MessageEdited {
-                    timestamp: wire.timestamp,
-                    message: wire.message,
+            "message_edited" => parse_update!(MessageEditedUpdate, |wire: MessageEditedUpdate| {
+                match wire.message {
+                    Some(message) => Self::MessageEdited {
+                        timestamp: wire.timestamp,
+                        message,
+                    },
+                    None => Self::MessageEditedMissing {
+                        timestamp: wire.timestamp,
+                    },
                 }
             }),
             "message_removed" => {
@@ -1377,6 +1982,47 @@ impl<'de> Deserialize<'de> for Update {
                     is_channel: wire.is_channel,
                 }
             }),
+            "bot_stopped" => parse_update!(UserDialogUpdate, |wire: UserDialogUpdate| {
+                Self::BotStopped {
+                    timestamp: wire.timestamp,
+                    chat_id: wire.chat_id,
+                    user: wire.user,
+                    user_locale: wire.user_locale,
+                }
+            }),
+            "dialog_cleared" => parse_update!(UserDialogUpdate, |wire: UserDialogUpdate| {
+                Self::DialogCleared {
+                    timestamp: wire.timestamp,
+                    chat_id: wire.chat_id,
+                    user: wire.user,
+                    user_locale: wire.user_locale,
+                }
+            }),
+            "dialog_muted" => parse_update!(DialogMutedUpdate, |wire: DialogMutedUpdate| {
+                Self::DialogMuted {
+                    timestamp: wire.timestamp,
+                    chat_id: wire.chat_id,
+                    user: wire.user,
+                    muted_until: wire.muted_until,
+                    user_locale: wire.user_locale,
+                }
+            }),
+            "dialog_unmuted" => parse_update!(UserDialogUpdate, |wire: UserDialogUpdate| {
+                Self::DialogUnmuted {
+                    timestamp: wire.timestamp,
+                    chat_id: wire.chat_id,
+                    user: wire.user,
+                    user_locale: wire.user_locale,
+                }
+            }),
+            "dialog_removed" => parse_update!(UserDialogUpdate, |wire: UserDialogUpdate| {
+                Self::DialogRemoved {
+                    timestamp: wire.timestamp,
+                    chat_id: wire.chat_id,
+                    user: wire.user,
+                    user_locale: wire.user_locale,
+                }
+            }),
             "user_added" => parse_update!(UserAddedUpdate, |wire: UserAddedUpdate| {
                 Self::UserAdded {
                     timestamp: wire.timestamp,
@@ -1404,6 +2050,19 @@ impl<'de> Deserialize<'de> for Update {
                         title: wire.title,
                     }
                 })
+            }
+            "message_chat_created" => {
+                parse_update!(
+                    MessageChatCreatedUpdate,
+                    |wire: MessageChatCreatedUpdate| {
+                        Self::MessageChatCreated {
+                            timestamp: wire.timestamp,
+                            chat: wire.chat,
+                            message_id: wire.message_id,
+                            start_payload: wire.start_payload,
+                        }
+                    }
+                )
             }
             _ => Self::Unknown {
                 update_type,
@@ -1742,6 +2401,19 @@ pub struct AddMembersBody {
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoveMemberQuery {
     pub user_id: i64,
+}
+
+/// Query options for DELETE /chats/{chatId}/members.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct RemoveMemberOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block: Option<bool>,
+}
+
+impl RemoveMemberOptions {
+    pub fn block(block: bool) -> Self {
+        Self { block: Some(block) }
+    }
 }
 
 /// Pinned message info.

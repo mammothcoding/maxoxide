@@ -5,8 +5,9 @@
 
 use maxoxide::types::{
     AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatAdmin, ChatAdminPermission,
-    ChatType, EditChatBody, KeyboardPayload, Message, NewAttachment, NewMessageBody,
-    PinMessageBody, SendMessageOptions, SenderAction, SubscribeBody, Update, UploadType,
+    ChatType, EditChatBody, KeyboardPayload, MarkupElement, Message, MessageFormat, NewAttachment,
+    NewMessageBody, PinMessageBody, RemoveMemberOptions, SendMessageOptions, SenderAction,
+    SubscribeBody, Subscription, Update, UploadType,
 };
 use maxoxide::{Bot, reqwest::Client};
 use std::error::Error;
@@ -14,7 +15,10 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio::time::{sleep, timeout as tokio_timeout};
 
 type AnyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -23,11 +27,61 @@ const GROUP_WAIT_SECS: u64 = 240;
 const MANUAL_WAIT_SECS: u64 = 120;
 const WAIT_PROMPT_CHUNK_SECS: u64 = 15;
 const MAX_NON_MATCHING_UPDATE_LOGS: usize = 5;
+const MAX_WEBHOOK_HEADER_BYTES: usize = 32 * 1024;
+const MAX_WEBHOOK_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum Language {
     English,
     Russian,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpdateTransport {
+    LongPolling,
+    Webhook,
+}
+
+impl UpdateTransport {
+    fn prompt(lang: Language) -> AnyResult<Self> {
+        loop {
+            let value = prompt(tr(
+                lang,
+                "Update transport [long_polling/webhook] [long_polling]",
+                "Транспорт updates [long_polling/webhook] [long_polling]",
+            ))?;
+            let normalized = value.trim().to_ascii_lowercase();
+
+            if normalized.is_empty()
+                || matches!(
+                    normalized.as_str(),
+                    "long" | "long_polling" | "polling" | "lp"
+                )
+            {
+                return Ok(Self::LongPolling);
+            }
+
+            if matches!(normalized.as_str(), "webhook" | "web" | "wh" | "вебхук") {
+                return Ok(Self::Webhook);
+            }
+
+            println!(
+                "{}",
+                tr(
+                    lang,
+                    "Expected `long_polling` or `webhook`.",
+                    "Ожидалось `long_polling` или `webhook`.",
+                )
+            );
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LongPolling => "long_polling",
+            Self::Webhook => "webhook",
+        }
+    }
 }
 
 impl Language {
@@ -67,19 +121,33 @@ async fn main() -> AnyResult<()> {
     let config = Config::prompt(lang)?;
     let client = Client::builder().timeout(config.http_timeout).build()?;
     let bot = Bot::with_client(config.token.clone(), client);
-    let mut harness = Harness::new(bot, config.request_delay, config.poll_timeout, lang);
+    let webhook_updates = if config.transport == UpdateTransport::Webhook {
+        Some(start_webhook_receiver(&config).await?)
+    } else {
+        None
+    };
+    let mut harness = Harness::new(
+        bot,
+        config.request_delay,
+        config.poll_timeout,
+        config.transport,
+        webhook_updates,
+        lang,
+    );
     let mut report = Report::default();
 
     print_section(tr(lang, "Live Test", "Живой тест"));
     match lang {
         Language::English => println!(
-            "Interactive real-API run with request delay {} ms, HTTP timeout {} s, polling timeout {} s.",
+            "Interactive real-API run with transport {}, request delay {} ms, HTTP timeout {} s, polling timeout {} s.",
+            config.transport.as_str(),
             config.request_delay.as_millis(),
             config.http_timeout.as_secs(),
             config.poll_timeout
         ),
         Language::Russian => println!(
-            "Интерактивный прогон по реальному API: задержка между запросами {} мс, HTTP timeout {} c, polling timeout {} c.",
+            "Интерактивный прогон по реальному API: транспорт {}, задержка между запросами {} мс, HTTP timeout {} c, polling timeout {} c.",
+            config.transport.as_str(),
             config.request_delay.as_millis(),
             config.http_timeout.as_secs(),
             config.poll_timeout
@@ -121,52 +189,145 @@ async fn main() -> AnyResult<()> {
         })
         .unwrap_or_default();
 
-    match harness.flush_updates().await {
-        Ok(drained) => {
-            let detail = match lang {
-                Language::English => {
-                    format!("marker synchronized, drained {drained} backlog update(s)")
-                }
-                Language::Russian => {
-                    format!("marker синхронизирован, очищено {drained} backlog-обновлений")
-                }
+    let disabled_webhook_subscriptions = match config.transport {
+        UpdateTransport::LongPolling => {
+            let Some(disabled) =
+                prepare_long_polling_phase(&mut harness, &mut report, &config).await?
+            else {
+                report.print_summary(lang);
+                return Ok(());
             };
-            report.pass("bot.get_updates", detail);
+
+            match harness.flush_updates().await {
+                Ok(drained) => {
+                    let detail = match lang {
+                        Language::English => {
+                            format!("marker synchronized, drained {drained} backlog update(s)")
+                        }
+                        Language::Russian => {
+                            format!("marker синхронизирован, очищено {drained} backlog-обновлений")
+                        }
+                    };
+                    report.pass("bot.get_updates", detail);
+                }
+                Err(err) => {
+                    report.fail("bot.get_updates", err.to_string());
+                    restore_disabled_webhooks(&mut harness, &mut report, &config, &disabled)
+                        .await?;
+                    report.print_summary(lang);
+                    return Ok(());
+                }
+            }
+
+            let raw_marker = harness.marker;
+            let raw_response = harness
+                .api_case(&mut report, "bot.get_updates_raw", move |bot| async move {
+                    bot.get_updates_raw(raw_marker, Some(1), Some(1)).await
+                })
+                .await;
+            if let Some(marker) = raw_response.and_then(|response| response.marker) {
+                harness.marker = Some(marker);
+            }
+
+            let typed_filter_marker = harness.marker;
+            let typed_filter_response = harness
+                .api_case(
+                    &mut report,
+                    "bot.get_updates_with_types(message_created)",
+                    move |bot| async move {
+                        bot.get_updates_with_types(
+                            typed_filter_marker,
+                            Some(1),
+                            Some(1),
+                            ["message_created"],
+                        )
+                        .await
+                    },
+                )
+                .await;
+            if let Some(marker) = typed_filter_response.and_then(|response| response.marker) {
+                harness.marker = Some(marker);
+            }
+
+            let raw_filter_marker = harness.marker;
+            let raw_filter_response = harness
+                .api_case(
+                    &mut report,
+                    "bot.get_updates_raw_with_types(message_callback)",
+                    move |bot| async move {
+                        bot.get_updates_raw_with_types(
+                            raw_filter_marker,
+                            Some(1),
+                            Some(1),
+                            ["message_callback"],
+                        )
+                        .await
+                    },
+                )
+                .await;
+            if let Some(marker) = raw_filter_response.and_then(|response| response.marker) {
+                harness.marker = Some(marker);
+            }
+
+            disabled
         }
-        Err(err) => {
-            report.fail("bot.get_updates", err.to_string());
-            report.print_summary(lang);
-            return Ok(());
+        UpdateTransport::Webhook => {
+            if !prepare_webhook_phase(&mut harness, &mut report, &config).await? {
+                report.print_summary(lang);
+                return Ok(());
+            }
+            skip_cases(
+                &mut report,
+                &[
+                    "bot.get_updates",
+                    "bot.get_updates_raw",
+                    "bot.get_updates_with_types(message_created)",
+                    "bot.get_updates_raw_with_types(message_callback)",
+                ],
+                tr(
+                    lang,
+                    "live test is running in webhook transport mode",
+                    "live-тест запущен в webhook-режиме транспорта",
+                ),
+            );
+
+            Vec::new()
         }
+    };
+
+    let run_result = async {
+        let private_phase = run_private_phase(&mut harness, &mut report, &config).await?;
+        run_upload_phase(
+            &mut harness,
+            &mut report,
+            private_phase.chat_id,
+            private_phase.user_id,
+            &config,
+        )
+        .await?;
+        run_webhook_phase(&mut harness, &mut report, &config).await?;
+        run_commands_phase(&mut harness, &mut report, lang).await?;
+        run_group_phase(
+            &mut harness,
+            &mut report,
+            &config,
+            &known_chats,
+            private_phase.user_id,
+        )
+        .await?;
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
+
+    if let Err(err) = run_result {
+        report.fail("live_test", err.to_string());
     }
 
-    let raw_marker = harness.marker;
-    let raw_response = harness
-        .api_case(&mut report, "bot.get_updates_raw", move |bot| async move {
-            bot.get_updates_raw(raw_marker, Some(1), Some(1)).await
-        })
-        .await;
-    if let Some(marker) = raw_response.and_then(|response| response.marker) {
-        harness.marker = Some(marker);
-    }
-
-    let private_phase = run_private_phase(&mut harness, &mut report, &config).await?;
-    run_upload_phase(
-        &mut harness,
-        &mut report,
-        private_phase.chat_id,
-        private_phase.user_id,
-        &config,
-    )
-    .await?;
-    run_webhook_phase(&mut harness, &mut report, &config).await?;
-    run_commands_phase(&mut harness, &mut report, lang).await?;
-    run_group_phase(
+    restore_disabled_webhooks(
         &mut harness,
         &mut report,
         &config,
-        &known_chats,
-        private_phase.user_id,
+        &disabled_webhook_subscriptions,
     )
     .await?;
 
@@ -199,8 +360,8 @@ async fn run_private_phase(
         "{}",
         tr(
             lang,
-            "2. Send `/live` to the bot from a private dialog.",
-            "2. Отправьте `/live` боту в личном диалоге.",
+            "2. Send `/live` to the bot from a private dialog after the waiting step starts.",
+            "2. Отправьте `/live` боту в личном диалоге после начала ожидания.",
         )
     );
 
@@ -210,15 +371,12 @@ async fn run_private_phase(
             "manual.private_activation",
             tr(
                 lang,
-                "Waiting for `/live` in a private chat.",
-                "Ожидание `/live` в личном чате.",
+                "Waiting for a new `/live` message in a private chat. Messages sent before this step are ignored by backlog flush.",
+                "Ожидание нового сообщения `/live` в личном чате. Сообщения, отправленные до этого шага, игнорируются очисткой backlog.",
             ),
             Duration::from_secs(PRIVATE_WAIT_SECS),
             |update| match update {
-                Update::MessageCreated { message, .. } => {
-                    message.recipient.chat_type == ChatType::Dialog
-                        && message.text() == Some("/live")
-                }
+                Update::MessageCreated { message, .. } => is_private_activation_message(message),
                 _ => false,
             },
         )
@@ -233,6 +391,9 @@ async fn run_private_phase(
                 "bot.send_text_to_user",
                 "bot.send_markdown_to_chat",
                 "bot.send_markdown_to_user",
+                "bot.send_message_to_chat(markup_quote)",
+                "bot.get_message(markup_quote)",
+                "manual.message_markup_returned",
                 "bot.send_message_to_chat(text_body)",
                 "bot.send_message_to_user(text_body)",
                 "bot.send_message_to_chat_with_options(disable_link_preview)",
@@ -242,12 +403,19 @@ async fn run_private_phase(
                 "manual.observe_open_app_button",
                 "bot.send_message_to_chat(clipboard_button)",
                 "manual.observe_clipboard_button",
+                "bot.send_message_to_chat(chat_button)",
+                "manual.chat_button_click",
+                "bot.delete_chat(chat_button_chat)",
+                "bot.leave_chat(chat_button_chat)",
                 "bot.answer_callback",
                 "bot.edit_message",
                 "bot.get_message",
                 "bot.get_messages",
                 "bot.get_messages_by_ids",
                 "bot.delete_message",
+                "manual.contact_hash_valid",
+                "manual.contact_max_info_present",
+                "manual.dialog_event",
             ],
             tr(
                 lang,
@@ -320,6 +488,70 @@ async fn run_private_phase(
                 lang,
                 "sender.user_id is missing",
                 "sender.user_id отсутствует",
+            ),
+        );
+    }
+
+    let markup_message = harness
+        .api_case(
+            report,
+            "bot.send_message_to_chat(markup_quote)",
+            move |bot| async move {
+                bot.send_message_to_chat(
+                    private_chat_id,
+                    NewMessageBody::text(
+                        "# maxoxide markup probe\n\n**strong**, _emphasis_, ~~strike~~, ++underline++, ^^highlight^^, `code`, [docs](https://dev.max.ru/)",
+                    )
+                    .with_format(MessageFormat::Markdown),
+                )
+                .await
+            },
+        )
+        .await;
+
+    if let Some(markup_message) = markup_message {
+        let message_id = markup_message.message_id().to_string();
+        let fetched_markup_message = harness
+            .api_case(
+                report,
+                "bot.get_message(markup_quote)",
+                move |bot| async move { bot.get_message(&message_id).await },
+            )
+            .await;
+        let markup_source = fetched_markup_message.as_ref().unwrap_or(&markup_message);
+        if let Some(kinds) = message_markup_kinds(markup_source) {
+            report.pass(
+                "manual.message_markup_returned",
+                match lang {
+                    Language::English => format!("markup kinds: {kinds}"),
+                    Language::Russian => format!("типы разметки: {kinds}"),
+                },
+            );
+        } else {
+            report.skip(
+                "manual.message_markup_returned",
+                tr(
+                    lang,
+                    "MAX did not return markup for the bot's formatted message; treating this as a platform limitation",
+                    "MAX не вернул markup для форматированного сообщения бота; шаг помечен как платформенное ограничение",
+                ),
+            );
+        }
+    } else {
+        report.skip(
+            "bot.get_message(markup_quote)",
+            tr(
+                lang,
+                "formatted markup message was not sent",
+                "форматированное сообщение с markup не было отправлено",
+            ),
+        );
+        report.skip(
+            "manual.message_markup_returned",
+            tr(
+                lang,
+                "formatted markup message was not sent",
+                "форматированное сообщение с markup не было отправлено",
             ),
         );
     }
@@ -570,6 +802,157 @@ async fn run_private_phase(
             lang,
             tr(
                 lang,
+                "Probe ChatButton now? WARNING: tapping it creates a real chat and adds the bot as admin. Type `y` only if this is acceptable.",
+                "Проверить ChatButton сейчас? ВНИМАНИЕ: нажатие создаёт настоящий чат и добавляет бота администратором. Введите `y`, только если это допустимо.",
+            ),
+            false,
+        )? {
+            let chat_button_payload = "maxoxide-live-chat-button".to_string();
+            let chat_button_body = NewMessageBody::text(tr(
+                lang,
+                "MAX platform probe: chat button. Tapping it creates a real chat.",
+                "Проверка платформы MAX: chat-кнопка. Нажатие создаёт настоящий чат.",
+            ))
+            .with_keyboard(KeyboardPayload {
+                buttons: vec![vec![Button::chat_full(
+                    tr(lang, "Create test chat", "Создать тестовый чат"),
+                    "maxoxide live chat",
+                    Some("Created by maxoxide live_api_test".into()),
+                    Some(chat_button_payload.clone()),
+                    None,
+                )]],
+            });
+            let chat_button_body_debug = chat_button_body.clone();
+            let chat_button_message = match harness
+                .api_try_case(
+                    "bot.send_message_to_chat(chat_button)",
+                    move |bot| async move {
+                        bot.send_message_to_chat(private_chat_id, chat_button_body)
+                            .await
+                    },
+                )
+                .await
+            {
+                Ok(message) => {
+                    report.pass(
+                        "bot.send_message_to_chat(chat_button)",
+                        tr(lang, "ok", "ok"),
+                    );
+                    println!("   PASS");
+                    Some(message)
+                }
+                Err(err) => {
+                    let detail = err.to_string();
+                    if is_chat_button_platform_rejection(&detail) {
+                        let skip_detail = match lang {
+                            Language::English => format!(
+                                "MAX rejected documented ChatButton JSON; treating this opt-in probe as a platform limitation: {detail}"
+                            ),
+                            Language::Russian => format!(
+                                "MAX отклонил документированный JSON ChatButton; opt-in проверка помечена как платформенное ограничение: {detail}"
+                            ),
+                        };
+                        report.skip("bot.send_message_to_chat(chat_button)", skip_detail.clone());
+                        println!("   SKIP: {skip_detail}");
+                    } else {
+                        report.fail("bot.send_message_to_chat(chat_button)", detail.clone());
+                        println!("   FAIL: {detail}");
+                    }
+                    None
+                }
+            };
+
+            let created_chat = if let Some(chat_button_message) = chat_button_message {
+                let source_message_id = chat_button_message.message_id().to_string();
+                wait_for_chat_button_creation_raw(
+                    harness,
+                    report,
+                    lang,
+                    Some(source_message_id.as_str()),
+                    Some(chat_button_payload.as_str()),
+                )
+                .await
+            } else {
+                println!(
+                    "{}",
+                    tr(
+                        lang,
+                        "Outgoing ChatButton JSON rejected by MAX:",
+                        "Исходящий JSON ChatButton, который MAX отклонил:",
+                    )
+                );
+                print_json_value(&serde_json::to_value(&chat_button_body_debug)?);
+
+                let should_capture_existing = confirm(
+                    lang,
+                    tr(
+                        lang,
+                        "If you have any existing chat button available, wait for raw message_chat_created now?",
+                        "Если есть любая уже доступная chat-кнопка, подождать raw message_chat_created сейчас?",
+                    ),
+                    false,
+                )?;
+                let captured = if should_capture_existing {
+                    wait_for_chat_button_creation_raw(harness, report, lang, None, None).await
+                } else {
+                    None
+                };
+
+                if !should_capture_existing {
+                    report.skip(
+                        "manual.chat_button_click",
+                        tr(
+                            lang,
+                            "chat button message was not sent",
+                            "сообщение с chat-кнопкой не было отправлено",
+                        ),
+                    );
+                }
+
+                captured
+            };
+
+            if let Some(chat_id) = created_chat {
+                handle_created_chat_cleanup(harness, report, lang, chat_id).await?;
+            } else {
+                report.skip(
+                    "bot.delete_chat(chat_button_chat)",
+                    tr(
+                        lang,
+                        "created chat is unavailable",
+                        "созданный чат недоступен",
+                    ),
+                );
+                report.skip(
+                    "bot.leave_chat(chat_button_chat)",
+                    tr(
+                        lang,
+                        "created chat is unavailable",
+                        "созданный чат недоступен",
+                    ),
+                );
+            }
+        } else {
+            skip_cases(
+                report,
+                &[
+                    "bot.send_message_to_chat(chat_button)",
+                    "manual.chat_button_click",
+                    "bot.delete_chat(chat_button_chat)",
+                    "bot.leave_chat(chat_button_chat)",
+                ],
+                tr(
+                    lang,
+                    "tester skipped ChatButton probe",
+                    "тестер пропустил проверку ChatButton",
+                ),
+            );
+        }
+
+        if confirm(
+            lang,
+            tr(
+                lang,
                 "Test callback button now? Type `y` to wait for click, anything else to skip.",
                 "Проверить callback-кнопку сейчас? Введите `y`, чтобы ждать нажатие, иначе шаг будет пропущен.",
             ),
@@ -701,13 +1084,86 @@ async fn run_private_phase(
                 .await;
 
             if let Some(update) = contact_update {
-                if let Some(phone) = extract_contact_phone(&update) {
+                if let Some(details) = extract_contact_details(&update, &config.token) {
+                    if let Some(phone) = details.phone() {
+                        report.pass(
+                            "manual.contact_phone_present",
+                            match lang {
+                                Language::English => format!("phone={phone}"),
+                                Language::Russian => format!("телефон={phone}"),
+                            },
+                        );
+                    } else {
+                        report.skip(
+                            "manual.contact_phone_present",
+                            tr(
+                                lang,
+                                "contact attachment was received, but vcf_phone and VCF TEL entries are empty; treating this as a current MAX platform gap",
+                                "contact-вложение пришло, но vcf_phone и TEL в VCF пустые; шаг помечен как текущее платформенное ограничение MAX",
+                            ),
+                        );
+                    }
+
+                    match details.hash_valid {
+                        Some(true) => report.pass(
+                            "manual.contact_hash_valid",
+                            tr(lang, "hash matches vcf_info", "hash соответствует vcf_info"),
+                        ),
+                        Some(false) => report.fail(
+                            "manual.contact_hash_valid",
+                            tr(
+                                lang,
+                                "hash does not match vcf_info",
+                                "hash не соответствует vcf_info",
+                            ),
+                        ),
+                        None => report.skip(
+                            "manual.contact_hash_valid",
+                            tr(
+                                lang,
+                                "contact hash or vcf_info is missing",
+                                "hash контакта или vcf_info отсутствует",
+                            ),
+                        ),
+                    }
+
+                    if let Some(user_id) = details.max_user_id {
+                        report.pass(
+                            "manual.contact_max_info_present",
+                            match lang {
+                                Language::English => format!("max_info.user_id={user_id}"),
+                                Language::Russian => format!("max_info.user_id={user_id}"),
+                            },
+                        );
+                    } else {
+                        report.skip(
+                            "manual.contact_max_info_present",
+                            tr(lang, "max_info is missing", "max_info отсутствует"),
+                        );
+                    }
+                } else if let Some(phone) = extract_contact_phone(&update) {
                     report.pass(
                         "manual.contact_phone_present",
                         match lang {
                             Language::English => format!("phone={phone}"),
                             Language::Russian => format!("телефон={phone}"),
                         },
+                    );
+                    report.skip(
+                        "manual.contact_hash_valid",
+                        tr(
+                            lang,
+                            "contact details are unavailable",
+                            "детали контакта недоступны",
+                        ),
+                    );
+                    report.skip(
+                        "manual.contact_max_info_present",
+                        tr(
+                            lang,
+                            "contact details are unavailable",
+                            "детали контакта недоступны",
+                        ),
                     );
                 } else {
                     report.skip(
@@ -718,10 +1174,34 @@ async fn run_private_phase(
                             "contact-вложение пришло, но поле vcf_phone пустое; шаг помечен как текущее платформенное ограничение MAX",
                         ),
                     );
+                    report.skip(
+                        "manual.contact_hash_valid",
+                        tr(lang, "contact hash is missing", "hash контакта отсутствует"),
+                    );
+                    report.skip(
+                        "manual.contact_max_info_present",
+                        tr(lang, "max_info is missing", "max_info отсутствует"),
+                    );
                 }
             } else {
                 report.skip(
                     "manual.contact_phone_present",
+                    tr(
+                        lang,
+                        "contact share step did not complete",
+                        "шаг отправки контакта не был завершён",
+                    ),
+                );
+                report.skip(
+                    "manual.contact_hash_valid",
+                    tr(
+                        lang,
+                        "contact share step did not complete",
+                        "шаг отправки контакта не был завершён",
+                    ),
+                );
+                report.skip(
+                    "manual.contact_max_info_present",
                     tr(
                         lang,
                         "contact share step did not complete",
@@ -740,6 +1220,22 @@ async fn run_private_phase(
             );
             report.skip(
                 "manual.contact_phone_present",
+                tr(
+                    lang,
+                    "tester skipped contact share",
+                    "тестер пропустил отправку контакта",
+                ),
+            );
+            report.skip(
+                "manual.contact_hash_valid",
+                tr(
+                    lang,
+                    "tester skipped contact share",
+                    "тестер пропустил отправку контакта",
+                ),
+            );
+            report.skip(
+                "manual.contact_max_info_present",
                 tr(
                     lang,
                     "tester skipped contact share",
@@ -1034,6 +1530,46 @@ async fn run_private_phase(
         );
     }
 
+    if confirm(
+        lang,
+        tr(
+            lang,
+            "Optionally observe one dialog event now? You can mute/unmute, clear/remove the dialog, or stop the bot, then continue the run manually if needed. Type `y` to wait.",
+            "Опционально поймать одно dialog-событие сейчас? Можно отключить/включить уведомления, очистить/удалить диалог или остановить бота, затем продолжить прогон вручную при необходимости. Введите `y`, чтобы ждать.",
+        ),
+        false,
+    )? {
+        let _ = harness
+            .wait_case(
+                report,
+                "manual.dialog_event",
+                tr(
+                    lang,
+                    "Trigger one dialog event in MAX: mute, unmute, clear/remove dialog, or stop the bot.",
+                    "Вызовите одно dialog-событие в MAX: mute, unmute, clear/remove dialog или stop bot.",
+                ),
+                Duration::from_secs(MANUAL_WAIT_SECS),
+                |update| match update {
+                    Update::BotStopped { chat_id, .. }
+                    | Update::DialogCleared { chat_id, .. }
+                    | Update::DialogMuted { chat_id, .. }
+                    | Update::DialogUnmuted { chat_id, .. }
+                    | Update::DialogRemoved { chat_id, .. } => *chat_id == private_chat_id,
+                    _ => false,
+                },
+            )
+            .await;
+    } else {
+        report.skip(
+            "manual.dialog_event",
+            tr(
+                lang,
+                "tester skipped optional dialog event observation",
+                "тестер пропустил опциональное наблюдение dialog-события",
+            ),
+        );
+    }
+
     if let Some(plain_message) = plain_message {
         let message_id = plain_message.message_id().to_string();
         let _ = harness
@@ -1096,6 +1632,236 @@ async fn run_private_phase(
         chat_id: Some(private_chat_id),
         user_id: private_user_id,
     })
+}
+
+async fn prepare_long_polling_phase(
+    harness: &mut Harness,
+    report: &mut Report,
+    config: &Config,
+) -> AnyResult<Option<Vec<Subscription>>> {
+    let lang = config.lang;
+    let subscriptions = harness
+        .api_case(
+            report,
+            "bot.get_subscriptions(pre_poll)",
+            |bot| async move { bot.get_subscriptions().await },
+        )
+        .await;
+
+    let Some(subscriptions) = subscriptions else {
+        report.skip(
+            "manual.long_polling_subscription_check",
+            tr(
+                lang,
+                "could not inspect active webhook subscriptions",
+                "не удалось проверить активные webhook subscriptions",
+            ),
+        );
+        return Ok(Some(Vec::new()));
+    };
+
+    if subscriptions.subscriptions.is_empty() {
+        report.pass(
+            "manual.long_polling_subscription_check",
+            tr(
+                lang,
+                "no active webhook subscriptions",
+                "активных webhook subscriptions нет",
+            ),
+        );
+        return Ok(Some(Vec::new()));
+    }
+
+    print_subscriptions(&subscriptions.subscriptions, lang);
+    println!(
+        "{}",
+        tr(
+            lang,
+            "Active webhook subscriptions disable long polling, so manual update waits will not receive `/live`.",
+            "Активные webhook subscriptions отключают long polling, поэтому ручные ожидания updates не получат `/live`.",
+        )
+    );
+
+    if config.webhook_secret.is_none() {
+        println!(
+            "{}",
+            tr(
+                lang,
+                "MAX does not return webhook secrets from get_subscriptions. Because webhook secret is empty in the initial config, restoration will subscribe without a secret.",
+                "MAX не возвращает webhook secrets из get_subscriptions. Так как webhook secret пустой в начальной конфигурации, восстановление подпишет webhook без secret.",
+            )
+        );
+        if !confirm(
+            lang,
+            tr(
+                lang,
+                "Continue and restore disabled webhooks without a secret?",
+                "Продолжить и восстановить отключённые webhooks без secret?",
+            ),
+            false,
+        )? {
+            report.fail(
+                "manual.long_polling_subscription_check",
+                tr(
+                    lang,
+                    "active webhooks were left enabled because webhook secret for restoration was not provided",
+                    "активные webhooks оставлены включёнными, потому что webhook secret для восстановления не был указан",
+                ),
+            );
+            return Ok(None);
+        }
+    }
+
+    if !confirm(
+        lang,
+        tr(
+            lang,
+            "Unsubscribe all active webhooks now before long-polling tests? Type `y` to continue the live run.",
+            "Отписать все активные webhooks сейчас перед long-polling тестами? Введите `y`, чтобы продолжить live-прогон.",
+        ),
+        false,
+    )? {
+        report.fail(
+            "manual.long_polling_subscription_check",
+            tr(
+                lang,
+                "active webhook subscriptions were left enabled; long polling would not receive updates",
+                "активные webhook subscriptions оставлены включёнными; long polling не будет получать updates",
+            ),
+        );
+        return Ok(None);
+    }
+
+    let active_subscriptions = subscriptions.subscriptions;
+    let mut disabled_subscriptions = Vec::new();
+    for subscription in &active_subscriptions {
+        let url = subscription.url.clone();
+        let removed = harness
+            .api_case(report, "bot.unsubscribe(pre_poll)", move |bot| async move {
+                bot.unsubscribe(&url).await
+            })
+            .await;
+        if removed.is_some() {
+            disabled_subscriptions.push(subscription.clone());
+        }
+    }
+
+    if disabled_subscriptions.len() != active_subscriptions.len() {
+        report.fail(
+            "manual.long_polling_subscription_check",
+            tr(
+                lang,
+                "not all active webhook subscriptions were removed; restoring removed subscriptions and stopping before long polling",
+                "не все активные webhook subscriptions были удалены; восстанавливаем удалённые subscriptions и останавливаемся перед long polling",
+            ),
+        );
+        restore_disabled_webhooks(harness, report, config, &disabled_subscriptions).await?;
+        return Ok(None);
+    }
+
+    report.pass(
+        "manual.long_polling_subscription_check",
+        tr(
+            lang,
+            "active webhook subscriptions were removed before long polling",
+            "активные webhook subscriptions удалены перед long polling",
+        ),
+    );
+    Ok(Some(disabled_subscriptions))
+}
+
+async fn restore_disabled_webhooks(
+    harness: &mut Harness,
+    report: &mut Report,
+    config: &Config,
+    disabled_subscriptions: &[Subscription],
+) -> AnyResult<()> {
+    if disabled_subscriptions.is_empty() {
+        return Ok(());
+    }
+
+    print_section(tr(config.lang, "Webhook Restore", "Восстановление webhook"));
+
+    for subscription in disabled_subscriptions {
+        let body = SubscribeBody {
+            url: subscription.url.clone(),
+            update_types: subscription.update_types.clone(),
+            version: subscription.version.clone(),
+            secret: config.webhook_secret.clone(),
+        };
+        let _ = harness
+            .api_case(
+                report,
+                "bot.subscribe(restore_pre_poll)",
+                move |bot| async move { bot.subscribe(body).await },
+            )
+            .await;
+    }
+
+    Ok(())
+}
+
+async fn prepare_webhook_phase(
+    harness: &mut Harness,
+    report: &mut Report,
+    config: &Config,
+) -> AnyResult<bool> {
+    let lang = config.lang;
+
+    if config.webhook_register {
+        let Some(url) = config.webhook_url.clone() else {
+            report.fail(
+                "bot.subscribe(webhook_transport)",
+                tr(
+                    lang,
+                    "webhook registration was requested, but webhook URL is empty",
+                    "запрошена регистрация webhook, но webhook URL пустой",
+                ),
+            );
+            return Ok(false);
+        };
+
+        let secret = config.webhook_secret.clone();
+        let subscribed = harness
+            .api_case(
+                report,
+                "bot.subscribe(webhook_transport)",
+                move |bot| async move {
+                    bot.subscribe(SubscribeBody {
+                        url,
+                        update_types: None,
+                        version: None,
+                        secret,
+                    })
+                    .await
+                },
+            )
+            .await
+            .is_some();
+
+        if !subscribed {
+            return Ok(false);
+        }
+    } else {
+        report.skip(
+            "bot.subscribe(webhook_transport)",
+            tr(
+                lang,
+                "tester chose to use an already configured webhook subscription",
+                "тестер выбрал уже настроенную webhook subscription",
+            ),
+        );
+    }
+
+    report.pass(
+        "manual.webhook_receiver_ready",
+        tr(
+            lang,
+            "local webhook receiver is running; manual waits will use webhook updates",
+            "локальный webhook receiver запущен; ручные ожидания будут использовать webhook updates",
+        ),
+    );
+    Ok(true)
 }
 
 async fn run_upload_phase(
@@ -1482,6 +2248,19 @@ async fn run_webhook_phase(
         })
         .await;
 
+    if config.transport == UpdateTransport::Webhook {
+        skip_cases(
+            report,
+            &["bot.subscribe", "bot.unsubscribe"],
+            tr(
+                lang,
+                "webhook subscription is used as the live update transport",
+                "webhook subscription используется как транспорт updates для live-прогона",
+            ),
+        );
+        return Ok(());
+    }
+
     let Some(url) = config.webhook_url.clone() else {
         skip_cases(
             report,
@@ -1629,7 +2408,7 @@ async fn run_group_phase(
                 "bot.add_admins",
                 "bot.remove_admin",
                 "bot.add_members",
-                "bot.remove_member",
+                "bot.remove_member_with_options",
                 "bot.delete_chat",
                 "bot.leave_chat",
             ],
@@ -1746,7 +2525,7 @@ async fn run_group_phase(
                 "bot.add_admins",
                 "bot.remove_admin",
                 "bot.add_members",
-                "bot.remove_member",
+                "bot.remove_member_with_options",
                 "bot.delete_chat",
                 "bot.leave_chat",
             ],
@@ -2032,8 +2811,8 @@ async fn run_group_phase(
         lang,
         tr(
             lang,
-            "Optional platform probe: enter a user_id for bot.add_admins/bot.remove_admin, or leave blank to skip",
-            "Опциональная platform-проверка: введите user_id для bot.add_admins/bot.remove_admin или оставьте поле пустым",
+            "Optional platform probe: enter an existing chat participant user_id for bot.add_admins/bot.remove_admin, or leave blank to skip",
+            "Опциональная platform-проверка: введите user_id существующего участника чата для bot.add_admins/bot.remove_admin или оставьте поле пустым",
         ),
     )?;
     if let Some(user_id) = admin_user_id {
@@ -2079,8 +2858,19 @@ async fn run_group_phase(
                         true
                     }
                     Err(err) => {
-                        report.fail("bot.add_admins", err.to_string());
-                        println!("   FAIL: {err}");
+                        let detail = err.to_string();
+                        if is_add_admins_not_participant(&detail) {
+                            let skip_detail = tr(
+                                lang,
+                                "provided user_id is not a chat participant",
+                                "указанный user_id не является участником чата",
+                            );
+                            report.skip("bot.add_admins", skip_detail);
+                            println!("   SKIP: {skip_detail}: {detail}");
+                        } else {
+                            report.fail("bot.add_admins", detail.clone());
+                            println!("   FAIL: {detail}");
+                        }
                         false
                     }
                 };
@@ -2129,8 +2919,8 @@ async fn run_group_phase(
         lang,
         tr(
             lang,
-            "Enter a user_id for bot.add_members/bot.remove_member, or leave blank to skip",
-            "Введите user_id для bot.add_members/bot.remove_member, или оставьте поле пустым для пропуска",
+            "Enter a user_id for bot.add_members/bot.remove_member_with_options, or leave blank to skip",
+            "Введите user_id для bot.add_members/bot.remove_member_with_options, или оставьте поле пустым для пропуска",
         ),
     )?;
     if let Some(user_id) = member_user_id {
@@ -2142,14 +2932,32 @@ async fn run_group_phase(
             .is_some();
 
         if added {
+            let block = confirm(
+                lang,
+                tr(
+                    lang,
+                    "Pass block=true to remove_member_with_options? This may block the user from rejoining linked chats.",
+                    "Передать block=true в remove_member_with_options? Это может запретить пользователю повторно войти в чат по ссылке.",
+                ),
+                false,
+            )?;
             let _ = harness
-                .api_case(report, "bot.remove_member", move |bot| async move {
-                    bot.remove_member(group_chat_id, user_id).await
-                })
+                .api_case(
+                    report,
+                    "bot.remove_member_with_options",
+                    move |bot| async move {
+                        bot.remove_member_with_options(
+                            group_chat_id,
+                            user_id,
+                            RemoveMemberOptions::block(block),
+                        )
+                        .await
+                    },
+                )
                 .await;
         } else {
             report.skip(
-                "bot.remove_member",
+                "bot.remove_member_with_options",
                 tr(
                     lang,
                     "bot.add_members did not succeed",
@@ -2167,7 +2975,7 @@ async fn run_group_phase(
             ),
         );
         report.skip(
-            "bot.remove_member",
+            "bot.remove_member_with_options",
             tr(
                 lang,
                 "tester did not provide a user_id",
@@ -2259,13 +3067,178 @@ async fn run_group_phase(
     Ok(())
 }
 
+async fn handle_created_chat_cleanup(
+    harness: &mut Harness,
+    report: &mut Report,
+    lang: Language,
+    chat_id: i64,
+) -> AnyResult<()> {
+    loop {
+        let action = prompt(tr(
+            lang,
+            "ChatButton created a real chat. Type `delete` to call delete_chat, `leave` to call leave_chat, or `keep` to leave it untouched",
+            "ChatButton создал настоящий чат. Введите `delete` для delete_chat, `leave` для leave_chat или `keep`, чтобы ничего не менять",
+        ))?;
+        match action.trim().to_ascii_lowercase().as_str() {
+            "delete" | "удалить" => {
+                let _ = harness
+                    .api_case(
+                        report,
+                        "bot.delete_chat(chat_button_chat)",
+                        move |bot| async move { bot.delete_chat(chat_id).await },
+                    )
+                    .await;
+                report.skip(
+                    "bot.leave_chat(chat_button_chat)",
+                    tr(lang, "created chat was deleted", "созданный чат был удалён"),
+                );
+                return Ok(());
+            }
+            "leave" | "выйти" => {
+                let _ = harness
+                    .api_case(
+                        report,
+                        "bot.leave_chat(chat_button_chat)",
+                        move |bot| async move { bot.leave_chat(chat_id).await },
+                    )
+                    .await;
+                report.skip(
+                    "bot.delete_chat(chat_button_chat)",
+                    tr(
+                        lang,
+                        "tester chose leave_chat instead of delete_chat",
+                        "тестер выбрал leave_chat вместо delete_chat",
+                    ),
+                );
+                return Ok(());
+            }
+            "keep" | "оставить" | "" => {
+                report.skip(
+                    "bot.delete_chat(chat_button_chat)",
+                    tr(
+                        lang,
+                        "tester kept the created chat",
+                        "тестер оставил созданный чат",
+                    ),
+                );
+                report.skip(
+                    "bot.leave_chat(chat_button_chat)",
+                    tr(
+                        lang,
+                        "tester kept the created chat",
+                        "тестер оставил созданный чат",
+                    ),
+                );
+                return Ok(());
+            }
+            _ => println!(
+                "{}",
+                tr(
+                    lang,
+                    "Expected `delete`, `leave`, or `keep`.",
+                    "Ожидалось `delete`, `leave` или `keep`.",
+                )
+            ),
+        }
+    }
+}
+
+async fn wait_for_chat_button_creation_raw(
+    harness: &mut Harness,
+    report: &mut Report,
+    lang: Language,
+    expected_message_id: Option<&str>,
+    expected_payload: Option<&str>,
+) -> Option<i64> {
+    let instructions = tr(
+        lang,
+        "Tap the chat button in MAX. It will create a real chat. The full incoming update JSON will be printed.",
+        "Нажмите chat-кнопку в MAX. Она создаст настоящий чат. Полный входящий JSON update будет напечатан.",
+    );
+
+    if harness.transport == UpdateTransport::Webhook {
+        return harness
+            .wait_case(
+                report,
+                "manual.chat_button_click",
+                instructions,
+                Duration::from_secs(MANUAL_WAIT_SECS),
+                |update| match update {
+                    Update::MessageChatCreated {
+                        chat,
+                        message_id,
+                        start_payload,
+                        ..
+                    } => {
+                        chat.chat_id != 0
+                            && expected_message_id
+                                .map(|expected| message_id == expected)
+                                .unwrap_or(true)
+                            && expected_payload
+                                .map(|expected| start_payload.as_deref() == Some(expected))
+                                .unwrap_or(true)
+                    }
+                    _ => false,
+                },
+            )
+            .await
+            .and_then(|update| match update {
+                Update::MessageChatCreated { chat, .. } => Some(chat.chat_id),
+                _ => None,
+            });
+    }
+
+    let raw = harness
+        .wait_raw_update_case(
+            report,
+            "manual.chat_button_click",
+            instructions,
+            Duration::from_secs(MANUAL_WAIT_SECS),
+            |raw| raw_update_type(raw) == Some("message_chat_created"),
+        )
+        .await?;
+
+    if let Some(expected_message_id) = expected_message_id {
+        let actual = raw.get("message_id").and_then(|value| value.as_str());
+        if actual != Some(expected_message_id) {
+            println!(
+                "   {}",
+                tr(
+                    lang,
+                    "Captured message_chat_created has a different message_id than the sent ChatButton message.",
+                    "Пойманный message_chat_created имеет другой message_id, чем отправленное сообщение с ChatButton.",
+                )
+            );
+        }
+    }
+
+    if let Some(expected_payload) = expected_payload {
+        let actual = raw.get("start_payload").and_then(|value| value.as_str());
+        if actual != Some(expected_payload) {
+            println!(
+                "   {}",
+                tr(
+                    lang,
+                    "Captured message_chat_created has a different start_payload than expected.",
+                    "Пойманный message_chat_created имеет другой start_payload, чем ожидалось.",
+                )
+            );
+        }
+    }
+
+    extract_message_chat_created_chat_id(&raw)
+}
+
 #[derive(Clone)]
 struct Config {
     lang: Language,
+    transport: UpdateTransport,
     token: String,
     bot_link: Option<String>,
     webhook_url: Option<String>,
     webhook_secret: Option<String>,
+    webhook_listen_addr: Option<String>,
+    webhook_register: bool,
     upload_file_path: Option<PathBuf>,
     upload_image_path: Option<PathBuf>,
     upload_video_path: Option<PathBuf>,
@@ -2287,6 +3260,7 @@ impl Config {
             )
         );
 
+        let transport = UpdateTransport::prompt(lang)?;
         let token = prompt_required(lang, tr(lang, "Bot token", "Токен бота"))?;
         let bot_link = prompt_optional(
             lang,
@@ -2296,22 +3270,62 @@ impl Config {
                 "URL бота для тестера (необязательно)",
             ),
         )?;
-        let webhook_url = prompt_optional(
-            lang,
+        let webhook_url_label = if transport == UpdateTransport::Webhook {
             tr(
                 lang,
-                "Webhook URL for subscribe/unsubscribe (optional)",
-                "Webhook URL для subscribe/unsubscribe (необязательно)",
-            ),
-        )?;
+                "Public webhook URL for MAX (optional if already subscribed)",
+                "Публичный webhook URL для MAX (необязательно, если уже подписан)",
+            )
+        } else {
+            tr(
+                lang,
+                "Webhook URL for subscribe/unsubscribe probe (optional; active subscriptions are restored from get_subscriptions)",
+                "Webhook URL для проверки subscribe/unsubscribe (необязательно; активные subscriptions восстанавливаются из get_subscriptions)",
+            )
+        };
+        let webhook_url = prompt_optional(lang, webhook_url_label)?;
         let webhook_secret = prompt_optional(
             lang,
             tr(
                 lang,
-                "Webhook secret (optional)",
-                "Webhook secret (необязательно)",
+                "Webhook secret for webhook mode and restoring temporarily disabled subscriptions (optional)",
+                "Webhook secret для webhook-режима и восстановления временно отключённых subscriptions (необязательно)",
             ),
         )?;
+        let (webhook_listen_addr, webhook_register) = if transport == UpdateTransport::Webhook {
+            let listen_addr = prompt_with_default(
+                tr(
+                    lang,
+                    "Local webhook listen address",
+                    "Локальный адрес для приёма webhook",
+                ),
+                "0.0.0.0:8080",
+            )?;
+            let register = if webhook_url.is_some() {
+                confirm(
+                    lang,
+                    tr(
+                        lang,
+                        "Register/update this webhook subscription before manual waits?",
+                        "Зарегистрировать/обновить эту webhook subscription перед ручными ожиданиями?",
+                    ),
+                    true,
+                )?
+            } else {
+                println!(
+                    "{}",
+                    tr(
+                        lang,
+                        "Webhook URL is empty, so the harness will only receive an already configured subscription.",
+                        "Webhook URL пустой, поэтому harness будет только принимать уже настроенную подписку.",
+                    )
+                );
+                false
+            };
+            (Some(listen_addr), register)
+        } else {
+            (None, false)
+        };
         let upload_file_path = prompt_optional(
             lang,
             tr(
@@ -2375,9 +3389,12 @@ impl Config {
         Ok(Self {
             lang,
             token,
+            transport,
             bot_link,
             webhook_url,
             webhook_secret,
+            webhook_listen_addr,
+            webhook_register,
             upload_file_path,
             upload_image_path,
             upload_video_path,
@@ -2389,21 +3406,235 @@ impl Config {
     }
 }
 
+async fn start_webhook_receiver(config: &Config) -> AnyResult<WebhookUpdates> {
+    let listen_addr = config
+        .webhook_listen_addr
+        .as_deref()
+        .unwrap_or("0.0.0.0:8080");
+    let listener = TcpListener::bind(listen_addr).await?;
+    let local_addr = listener.local_addr()?;
+    let expected_secret = config.webhook_secret.clone();
+    let (sender, receiver) = mpsc::channel(100);
+
+    match config.lang {
+        Language::English => println!("Local webhook receiver listening on {local_addr}."),
+        Language::Russian => println!("Локальный webhook receiver слушает {local_addr}."),
+    }
+
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let sender = sender.clone();
+                    let expected_secret = expected_secret.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) =
+                            handle_webhook_connection(stream, expected_secret, sender).await
+                        {
+                            eprintln!("webhook receiver error: {err}");
+                        }
+                    });
+                }
+                Err(err) => {
+                    eprintln!("webhook accept error: {err}");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(WebhookUpdates { receiver })
+}
+
+async fn handle_webhook_connection(
+    mut stream: TcpStream,
+    expected_secret: Option<String>,
+    sender: mpsc::Sender<Update>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let request = read_http_request(&mut stream).await?;
+    let status = if request.method != "POST" {
+        405
+    } else if !webhook_secret_matches(&request.headers, expected_secret.as_deref()) {
+        401
+    } else {
+        match serde_json::from_slice::<Update>(&request.body) {
+            Ok(update) => match sender.send(update).await {
+                Ok(()) => 200,
+                Err(_) => 503,
+            },
+            Err(err) => {
+                eprintln!("webhook JSON parse error: {err}");
+                200
+            }
+        }
+    };
+
+    write_http_response(&mut stream, status).await?;
+    Ok(())
+}
+
+async fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<HttpRequest, Box<dyn Error + Send + Sync>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let (header_end, delimiter_len) = loop {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before HTTP headers",
+            )
+            .into());
+        }
+
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(position) = find_http_header_end(&buffer) {
+            break position;
+        }
+
+        if buffer.len() > MAX_WEBHOOK_HEADER_BYTES {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "HTTP headers are too large").into(),
+            );
+        }
+    };
+
+    let headers_text = std::str::from_utf8(&buffer[..header_end])?;
+    let mut lines = headers_text.lines();
+    let request_line = lines.next().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "HTTP request line is missing")
+    })?;
+    let method = request_line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let mut headers = Vec::new();
+    let mut content_length = 0usize;
+
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        if name == "content-length" {
+            content_length = value.parse()?;
+        }
+        headers.push((name, value));
+    }
+
+    if content_length > MAX_WEBHOOK_BODY_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "webhook body is too large").into());
+    }
+
+    let body_start = header_end + delimiter_len;
+    let mut body = buffer[body_start..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed before HTTP body was complete",
+            )
+            .into());
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(content_length);
+
+    Ok(HttpRequest {
+        method,
+        headers,
+        body,
+    })
+}
+
+fn find_http_header_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| (position, 4))
+        .or_else(|| {
+            buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|position| (position, 2))
+        })
+}
+
+fn webhook_secret_matches(headers: &[(String, String)], expected_secret: Option<&str>) -> bool {
+    let Some(expected_secret) = expected_secret else {
+        return true;
+    };
+
+    headers
+        .iter()
+        .find(|(name, _)| name == "x-max-bot-api-secret")
+        .map(|(_, value)| value == expected_secret)
+        .unwrap_or(false)
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let reason = match status {
+        200 => "OK",
+        401 => "Unauthorized",
+        405 => "Method Not Allowed",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    let body = reason.as_bytes();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+struct WebhookUpdates {
+    receiver: mpsc::Receiver<Update>,
+}
+
+struct HttpRequest {
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
 struct Harness {
     bot: Bot,
     marker: Option<i64>,
     request_delay: Duration,
     poll_timeout: u32,
+    transport: UpdateTransport,
+    webhook_updates: Option<WebhookUpdates>,
     lang: Language,
 }
 
 impl Harness {
-    fn new(bot: Bot, request_delay: Duration, poll_timeout: u32, lang: Language) -> Self {
+    fn new(
+        bot: Bot,
+        request_delay: Duration,
+        poll_timeout: u32,
+        transport: UpdateTransport,
+        webhook_updates: Option<WebhookUpdates>,
+        lang: Language,
+    ) -> Self {
         Self {
             bot,
             marker: None,
             request_delay,
             poll_timeout,
+            transport,
+            webhook_updates,
             lang,
         }
     }
@@ -2433,6 +3664,16 @@ impl Harness {
                 None
             }
         }
+    }
+
+    async fn api_try_case<T, F, Fut>(&mut self, name: &str, operation: F) -> maxoxide::Result<T>
+    where
+        F: FnOnce(Bot) -> Fut,
+        Fut: Future<Output = maxoxide::Result<T>>,
+    {
+        self.pause().await;
+        print_case(name);
+        operation(self.bot.clone()).await
     }
 
     async fn flush_updates(&mut self) -> maxoxide::Result<usize> {
@@ -2526,7 +3767,121 @@ impl Harness {
         }
     }
 
+    async fn wait_raw_update_case<F>(
+        &mut self,
+        report: &mut Report,
+        name: &str,
+        instructions: &str,
+        timeout: Duration,
+        predicate: F,
+    ) -> Option<serde_json::Value>
+    where
+        F: Fn(&serde_json::Value) -> bool,
+    {
+        print_case(name);
+        println!("   {instructions}");
+
+        if self.transport != UpdateTransport::LongPolling {
+            let detail = tr(
+                self.lang,
+                "raw update capture is available only in long_polling transport mode",
+                "raw-перехват updates доступен только в режиме транспорта long_polling",
+            );
+            report.skip(name, detail);
+            println!("   SKIP: {detail}");
+            return None;
+        }
+
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                let detail = tr(
+                    self.lang,
+                    "timeout while waiting for raw update",
+                    "таймаут ожидания raw update",
+                );
+                report.fail(name, detail);
+                println!("   FAIL: {detail}");
+                return None;
+            }
+
+            let chunk = remaining.min(Duration::from_secs(WAIT_PROMPT_CHUNK_SECS));
+            match self.wait_for_raw_update_chunk(chunk, &predicate).await {
+                Ok(Some(update)) => {
+                    report.pass(
+                        name,
+                        tr(self.lang, "raw event received", "raw-событие получено"),
+                    );
+                    println!("   PASS");
+                    println!(
+                        "   {}",
+                        tr(
+                            self.lang,
+                            "Raw incoming update JSON:",
+                            "Полный входящий JSON update:",
+                        )
+                    );
+                    print_json_value(&update);
+                    return Some(update);
+                }
+                Ok(None) => match prompt_wait_decision(self.lang) {
+                    Ok(WaitDecision::Continue) => continue,
+                    Ok(WaitDecision::Skip) => {
+                        let detail = tr(
+                            self.lang,
+                            "tester skipped this waiting step",
+                            "тестер пропустил этот шаг ожидания",
+                        );
+                        report.skip(name, detail);
+                        println!("   SKIP: {detail}");
+                        return None;
+                    }
+                    Ok(WaitDecision::Fail) => {
+                        let detail = tr(
+                            self.lang,
+                            "tester marked this waiting step as failed",
+                            "тестер пометил этот шаг ожидания как проваленный",
+                        );
+                        report.fail(name, detail);
+                        println!("   FAIL: {detail}");
+                        return None;
+                    }
+                    Err(err) => {
+                        report.fail(name, err.to_string());
+                        println!("   FAIL: {err}");
+                        return None;
+                    }
+                },
+                Err(err) => {
+                    report.fail(name, err.to_string());
+                    println!("   FAIL: {err}");
+                    return None;
+                }
+            }
+        }
+    }
+
     async fn wait_for_update_chunk<F>(
+        &mut self,
+        timeout: Duration,
+        predicate: &F,
+    ) -> AnyResult<Option<Update>>
+    where
+        F: Fn(&Update) -> bool,
+    {
+        match self.transport {
+            UpdateTransport::LongPolling => {
+                self.wait_for_long_polling_update_chunk(timeout, predicate)
+                    .await
+            }
+            UpdateTransport::Webhook => {
+                self.wait_for_webhook_update_chunk(timeout, predicate).await
+            }
+        }
+    }
+
+    async fn wait_for_long_polling_update_chunk<F>(
         &mut self,
         timeout: Duration,
         predicate: &F,
@@ -2559,28 +3914,83 @@ impl Harness {
                     return Ok(Some(update));
                 }
 
-                if logged_non_matching < MAX_NON_MATCHING_UPDATE_LOGS {
-                    println!(
-                        "   {}",
-                        tr(
-                            self.lang,
-                            "Observed a non-matching update while waiting:",
-                            "Получено неподходящее обновление во время ожидания:",
-                        )
-                    );
-                    print_update_details(self.lang, &update);
-                    logged_non_matching += 1;
-                } else if logged_non_matching == MAX_NON_MATCHING_UPDATE_LOGS {
-                    println!(
-                        "   {}",
-                        tr(
-                            self.lang,
-                            "Further non-matching updates are hidden for this wait chunk.",
-                            "Дальнейшие неподходящие обновления в этом интервале скрыты.",
-                        )
-                    );
-                    logged_non_matching += 1;
+                log_non_matching_update(self.lang, &update, &mut logged_non_matching);
+            }
+        }
+    }
+
+    async fn wait_for_webhook_update_chunk<F>(
+        &mut self,
+        timeout: Duration,
+        predicate: &F,
+    ) -> AnyResult<Option<Update>>
+    where
+        F: Fn(&Update) -> bool,
+    {
+        let lang = self.lang;
+        let receiver = self
+            .webhook_updates
+            .as_mut()
+            .map(|updates| &mut updates.receiver)
+            .ok_or_else(|| io::Error::other("webhook receiver is not configured"))?;
+        let started = Instant::now();
+        let mut logged_non_matching = 0usize;
+
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+
+            match tokio_timeout(remaining, receiver.recv()).await {
+                Ok(Some(update)) => {
+                    if predicate(&update) {
+                        return Ok(Some(update));
+                    }
+                    log_non_matching_update(lang, &update, &mut logged_non_matching);
                 }
+                Ok(None) => {
+                    return Err(io::Error::other("webhook receiver channel closed").into());
+                }
+                Err(_) => return Ok(None),
+            }
+        }
+    }
+
+    async fn wait_for_raw_update_chunk<F>(
+        &mut self,
+        timeout: Duration,
+        predicate: &F,
+    ) -> AnyResult<Option<serde_json::Value>>
+    where
+        F: Fn(&serde_json::Value) -> bool,
+    {
+        let started = Instant::now();
+        let mut logged_non_matching = 0usize;
+        loop {
+            if started.elapsed() >= timeout {
+                return Ok(None);
+            }
+
+            self.pause().await;
+
+            let remaining = timeout.saturating_sub(started.elapsed());
+            let poll_secs = remaining.as_secs().min(self.poll_timeout as u64).max(1) as u32;
+            let response = self
+                .bot
+                .get_updates_raw(self.marker, Some(poll_secs), Some(100))
+                .await?;
+
+            if let Some(marker) = response.marker {
+                self.marker = Some(marker);
+            }
+
+            for update in response.updates {
+                if predicate(&update) {
+                    return Ok(Some(update));
+                }
+
+                log_non_matching_raw_update(self.lang, &update, &mut logged_non_matching);
             }
         }
     }
@@ -2771,6 +4181,25 @@ fn looks_like_client_map_card(message: &Message) -> bool {
         || normalized.contains("yandex.ru/maps")
 }
 
+fn is_private_activation_message(message: &Message) -> bool {
+    message.recipient.chat_type == ChatType::Dialog
+        && message.text().map(is_live_command_text).unwrap_or(false)
+}
+
+fn is_live_command_text(text: &str) -> bool {
+    let first_token = text.split_whitespace().next().unwrap_or_default();
+
+    first_token == "/live" || first_token.starts_with("/live@")
+}
+
+fn is_chat_button_platform_rejection(error: &str) -> bool {
+    error.contains("API error 400") && error.contains("Can't deserialize body")
+}
+
+fn is_add_admins_not_participant(error: &str) -> bool {
+    error.contains("API error 403") && error.contains("is not participant of chat")
+}
+
 fn is_non_keyboard_attachment(attachment: &Attachment) -> bool {
     !matches!(attachment, Attachment::InlineKeyboard { .. })
 }
@@ -2787,6 +4216,25 @@ fn extract_video_token(message: &Message) -> Option<String> {
         })
 }
 
+fn message_markup_kinds(message: &Message) -> Option<String> {
+    let markup = message.body.markup.as_ref()?.as_slice();
+    if markup.is_empty() {
+        return None;
+    }
+
+    Some(
+        markup
+            .iter()
+            .map(markup_kind_name)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn markup_kind_name(markup: &MarkupElement) -> &str {
+    markup.kind()
+}
+
 fn upload_type_name(upload_type: &UploadType) -> &'static str {
     match upload_type {
         UploadType::Image => "image",
@@ -2800,6 +4248,79 @@ fn upload_type_name(upload_type: &UploadType) -> &'static str {
 fn skip_cases(report: &mut Report, names: &[&str], reason: &str) {
     for name in names {
         report.skip(*name, reason);
+    }
+}
+
+fn raw_update_type(raw: &serde_json::Value) -> Option<&str> {
+    raw.get("update_type").and_then(|value| value.as_str())
+}
+
+fn extract_message_chat_created_chat_id(raw: &serde_json::Value) -> Option<i64> {
+    raw.get("chat")?.get("chat_id")?.as_i64()
+}
+
+fn print_json_value(value: &serde_json::Value) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => {
+            for line in json.lines() {
+                println!("   {line}");
+            }
+        }
+        Err(err) => println!("   <failed to render JSON: {err}>"),
+    }
+}
+
+fn log_non_matching_update(lang: Language, update: &Update, logged_non_matching: &mut usize) {
+    if *logged_non_matching < MAX_NON_MATCHING_UPDATE_LOGS {
+        println!(
+            "   {}",
+            tr(
+                lang,
+                "Observed a non-matching update while waiting:",
+                "Получено неподходящее обновление во время ожидания:",
+            )
+        );
+        print_update_details(lang, update);
+        *logged_non_matching += 1;
+    } else if *logged_non_matching == MAX_NON_MATCHING_UPDATE_LOGS {
+        println!(
+            "   {}",
+            tr(
+                lang,
+                "Further non-matching updates are hidden for this wait chunk.",
+                "Дальнейшие неподходящие обновления в этом интервале скрыты.",
+            )
+        );
+        *logged_non_matching += 1;
+    }
+}
+
+fn log_non_matching_raw_update(
+    lang: Language,
+    update: &serde_json::Value,
+    logged_non_matching: &mut usize,
+) {
+    if *logged_non_matching < MAX_NON_MATCHING_UPDATE_LOGS {
+        println!(
+            "   {}",
+            tr(
+                lang,
+                "Observed a non-matching raw update while waiting:",
+                "Получен неподходящий raw update во время ожидания:",
+            )
+        );
+        print_json_value(update);
+        *logged_non_matching += 1;
+    } else if *logged_non_matching == MAX_NON_MATCHING_UPDATE_LOGS {
+        println!(
+            "   {}",
+            tr(
+                lang,
+                "Further non-matching raw updates are hidden for this wait chunk.",
+                "Дальнейшие неподходящие raw updates в этом интервале скрыты.",
+            )
+        );
+        *logged_non_matching += 1;
     }
 }
 
@@ -2893,6 +4414,10 @@ fn print_update_details(lang: Language, update: &Update) {
         }
         Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
             println!("   chat_id: {}", message.chat_id());
+            println!(
+                "   chat_type: {}",
+                chat_type_name(&message.recipient.chat_type)
+            );
             println!("   message_id: {}", message.message_id());
             if let Some(sender) = &message.sender {
                 println!("   {}: {}", tr(lang, "user_id", "user_id"), sender.user_id);
@@ -2904,6 +4429,14 @@ fn print_update_details(lang: Language, update: &Update) {
             }
             if let Some(text) = message.text() {
                 println!("   {}: {text}", tr(lang, "text", "текст"));
+            }
+            if let Some(markup) = &message.body.markup {
+                let kinds = markup
+                    .iter()
+                    .map(markup_kind_name)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("   markup: {kinds}");
             }
             if let Some(url) = &message.url {
                 println!("   url: {url}");
@@ -2962,6 +4495,14 @@ fn print_update_details(lang: Language, update: &Update) {
                                 tr(lang, "phone", "телефон"),
                                 payload.vcf_phone
                             );
+                            let vcf_phones = payload.phones_from_vcf();
+                            if !vcf_phones.is_empty() {
+                                println!("   vcf_phones: {}", vcf_phones.join(","));
+                            }
+                            println!("   contact_hash: {:?}", payload.hash);
+                            if let Some(max_info) = &payload.max_info {
+                                println!("   max_info.user_id: {}", max_info.user_id);
+                            }
                         }
                         Attachment::Location { payload } => {
                             println!(
@@ -2986,6 +4527,28 @@ fn print_update_details(lang: Language, update: &Update) {
         Update::Unknown { raw, .. } => {
             println!("   raw_update: {raw}");
         }
+        Update::MessageEditedMissing { .. } => {
+            println!(
+                "   {}",
+                tr(
+                    lang,
+                    "message payload is missing",
+                    "payload сообщения отсутствует"
+                )
+            );
+        }
+        Update::MessageChatCreated {
+            chat,
+            message_id,
+            start_payload,
+            ..
+        } => {
+            println!("   created_chat_id: {}", chat.chat_id);
+            println!("   source_message_id: {message_id}");
+            if let Some(payload) = start_payload {
+                println!("   start_payload: {payload}");
+            }
+        }
         _ => {}
     }
 }
@@ -3000,9 +4563,52 @@ fn attachment_debug_name(attachment: &Attachment) -> &str {
         Attachment::InlineKeyboard { .. } => "inline_keyboard",
         Attachment::Location { .. } => "location",
         Attachment::Contact { .. } => "contact",
+        Attachment::Share { .. } => "share",
+        Attachment::Data { .. } => "data",
         Attachment::Unknown { r#type, .. } => r#type.as_str(),
         _ => "unknown",
     }
+}
+
+struct ContactDetails {
+    vcf_phone: Option<String>,
+    vcf_phones: Vec<String>,
+    hash_valid: Option<bool>,
+    max_user_id: Option<i64>,
+}
+
+impl ContactDetails {
+    fn phone(&self) -> Option<&str> {
+        self.vcf_phone
+            .as_deref()
+            .or_else(|| self.vcf_phones.first().map(String::as_str))
+    }
+}
+
+fn extract_contact_details(update: &Update, token: &str) -> Option<ContactDetails> {
+    let attachments = match update {
+        Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
+            message.body.attachments.as_ref()?
+        }
+        _ => return None,
+    };
+
+    attachments.iter().find_map(|attachment| match attachment {
+        Attachment::Contact { payload } => {
+            let hash_valid = payload
+                .hash
+                .as_ref()
+                .zip(payload.vcf_info.as_ref())
+                .map(|_| payload.validate_hash(token));
+            Some(ContactDetails {
+                vcf_phone: payload.vcf_phone.clone(),
+                vcf_phones: payload.phones_from_vcf(),
+                hash_valid,
+                max_user_id: payload.max_info.as_ref().map(|user| user.user_id),
+            })
+        }
+        _ => None,
+    })
 }
 
 fn extract_contact_phone(update: &Update) -> Option<&str> {
@@ -3028,10 +4634,16 @@ fn extract_sender_user_id(update: &Update) -> Option<i64> {
         Update::BotStarted { user, .. }
         | Update::BotAdded { user, .. }
         | Update::BotRemoved { user, .. }
+        | Update::BotStopped { user, .. }
+        | Update::DialogCleared { user, .. }
+        | Update::DialogMuted { user, .. }
+        | Update::DialogUnmuted { user, .. }
+        | Update::DialogRemoved { user, .. }
         | Update::UserAdded { user, .. }
         | Update::UserRemoved { user, .. }
         | Update::ChatTitleChanged { user, .. } => Some(user.user_id),
         Update::MessageRemoved { user_id, .. } => Some(*user_id),
+        Update::MessageEditedMissing { .. } | Update::MessageChatCreated { .. } => None,
         Update::Unknown { .. } => None,
         _ => None,
     }
@@ -3068,6 +4680,15 @@ fn prompt_optional(_lang: Language, label: &str) -> AnyResult<Option<String>> {
         Ok(None)
     } else {
         Ok(Some(value))
+    }
+}
+
+fn prompt_with_default(label: &str, default: &str) -> AnyResult<String> {
+    let value = prompt(&format!("{label} [{default}]"))?;
+    if value.is_empty() {
+        Ok(default.into())
+    } else {
+        Ok(value)
     }
 }
 
@@ -3193,6 +4814,32 @@ fn print_known_chats(chats: &[Chat], lang: Language) {
             chat.chat_id,
             chat_type_name(&chat.r#type),
             title
+        );
+    }
+}
+
+fn print_subscriptions(subscriptions: &[maxoxide::types::Subscription], lang: Language) {
+    if subscriptions.is_empty() {
+        return;
+    }
+
+    println!(
+        "{}",
+        tr(
+            lang,
+            "Active webhook subscriptions:",
+            "Активные webhook subscriptions:",
+        )
+    );
+    for subscription in subscriptions {
+        let update_types = subscription
+            .update_types
+            .as_ref()
+            .map(|types| types.join(","))
+            .unwrap_or_else(|| tr(lang, "all", "все").into());
+        println!(
+            "  - {} update_types={} version={:?}",
+            subscription.url, update_types, subscription.version
         );
     }
 }
