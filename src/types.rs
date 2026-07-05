@@ -224,10 +224,12 @@ pub struct Chat {
     pub last_event_time: Option<i64>,
     pub participants_count: Option<i32>,
     pub owner_id: Option<i64>,
+    pub participants: Option<BTreeMap<String, i64>>,
     pub is_public: Option<bool>,
     pub link: Option<String>,
     pub description: Option<String>,
     pub dialog_with_user: Option<User>,
+    pub messages_count: Option<i64>,
     pub chat_message_id: Option<String>,
     pub pinned_message: Option<Box<Message>>,
 }
@@ -2323,6 +2325,8 @@ pub enum ChatAdminPermission {
     PostEditDeleteMessage,
     EditMessage,
     DeleteMessage,
+    Edit,
+    Delete,
     Unknown(String),
 }
 
@@ -2340,6 +2344,8 @@ impl ChatAdminPermission {
             Self::PostEditDeleteMessage => "post_edit_delete_message",
             Self::EditMessage => "edit_message",
             Self::DeleteMessage => "delete_message",
+            Self::Edit => "edit",
+            Self::Delete => "delete",
             Self::Unknown(value) => value.as_str(),
         }
     }
@@ -2371,6 +2377,8 @@ impl<'de> Deserialize<'de> for ChatAdminPermission {
             "post_edit_delete_message" => Self::PostEditDeleteMessage,
             "edit_message" => Self::EditMessage,
             "delete_message" => Self::DeleteMessage,
+            "edit" => Self::Edit,
+            "delete" => Self::Delete,
             _ => Self::Unknown(value),
         })
     }

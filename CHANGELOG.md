@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0] - 2026-07-05
+
+### EN
+
+#### Release summary
+
+This compatible release follows the current official MAX SDKs and schema by switching the default API host to `platform-api2.max.ru` and adding the newly documented channel lookup endpoint.
+
+#### Added
+
+- Added `Bot::get_chat_by_link(chat_link)` for `GET /chats/{chatLink}`. The official API documents this endpoint for channels by public link / username, for example `@channel`; live availability depends on MAX Bot API access to that channel.
+- Added `Chat.participants` and `Chat.messages_count` fields from the current `Chat` schema.
+- Added typed `ChatAdminPermission::Edit` and `ChatAdminPermission::Delete` variants for the current admin permission enum.
+- Added optional `bot.get_chat_by_link` coverage to `examples/live_api_test.rs`.
+- Added automatic `Russian Trusted Root CA` handling for the default clients created by `Bot::new()` and `Bot::from_env()`: maxoxide tries to download the fresh PEM from the official `gu-st.ru` URL and falls back to an embedded copy while keeping TLS verification enabled.
+
+#### Changed
+
+- Switched the hardcoded API host from deprecated `https://platform-api.max.ru` to current `https://platform-api2.max.ru`.
+- Updated `examples/live_api_test.rs` to use the default bot client so it exercises automatic TLS trust setup and no longer asks for a custom HTTP timeout.
+- `Bot::get_chat_by_link` now accepts full `max.ru` URLs, plain channel names, and `@channel` names; full URLs are safely encoded as a single path segment and channel-name fallbacks are tried on `404`.
+- `examples/live_api_test.rs` now treats `bot.get_chat_by_link` `404 Chat not found by link` as an optional precondition skip because public links can be unavailable to the Bot API for a given bot/channel.
+
+### RU
+
+#### Кратко о релизе
+
+Совместимый релиз, который следует актуальным официальным SDK и схеме MAX: переключает default API host на `platform-api2.max.ru` и добавляет новый endpoint получения канала по публичной ссылке.
+
+#### Добавлено
+
+- Добавлен `Bot::get_chat_by_link(chat_link)` для `GET /chats/{chatLink}`. Официальный API документирует этот endpoint для каналов по публичной ссылке / username, например `@channel`; live-доступность зависит от доступа MAX Bot API к этому каналу.
+- Добавлены поля `Chat.participants` и `Chat.messages_count` из актуальной схемы `Chat`.
+- Добавлены typed variants `ChatAdminPermission::Edit` и `ChatAdminPermission::Delete` для актуального enum прав администратора.
+- Добавлена опциональная проверка `bot.get_chat_by_link` в `examples/live_api_test.rs`.
+- Добавлена автоматическая поддержка `Russian Trusted Root CA` для default clients, созданных через `Bot::new()` и `Bot::from_env()`: maxoxide пытается скачать свежий PEM с официального URL `gu-st.ru` и fallback-ом использует встроенную копию, не отключая TLS verification.
+
+#### Изменено
+
+- Hardcoded API host переключён с deprecated `https://platform-api.max.ru` на актуальный `https://platform-api2.max.ru`.
+- `examples/live_api_test.rs` переведён на default bot client, чтобы проверять автоматическую настройку TLS trust, и больше не спрашивает custom HTTP timeout.
+- `Bot::get_chat_by_link` теперь принимает full `max.ru` URL, имя канала без префикса и `@channel`; full URL безопасно кодируется как один path segment, а варианты имени канала пробуются при `404`.
+- `examples/live_api_test.rs` теперь помечает `bot.get_chat_by_link` `404 Chat not found by link` как пропущенное optional-предусловие, потому что публичная ссылка может быть недоступна Bot API для конкретного бота/канала.
+
 ## [2.1.0] - 2026-05-20
 
 ### EN
@@ -41,15 +85,6 @@ This compatible release tracks the May 2026 MAX Bot API updates without changing
 - `ChatButton` remains a MAX platform limitation in current live testing: documented `chat` button JSON is rejected by `POST /messages` with `400 Can't deserialize body`.
 - `set_my_commands` remains a MAX platform limitation: public live `POST /me/commands` requests return `404`.
 
-#### Verification
-
-- `cargo fmt --all`
-- `cargo check --all-targets --all-features`
-- `cargo test`
-- `cargo test --features webhook --target-dir /tmp/opencode/maxoxide-target`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- Full live API run against a real MAX bot: `89 PASS / 0 FAIL / 8 SKIP`
-
 ### RU
 
 #### Кратко о релизе
@@ -86,15 +121,6 @@ This compatible release tracks the May 2026 MAX Bot API updates without changing
 - Webhook subscribe/unsubscribe и восстановление перед long polling live-подтверждены.
 - `ChatButton` остаётся ограничением платформы MAX в текущем live-тестировании: документированный JSON `chat`-кнопки отклоняется `POST /messages` с `400 Can't deserialize body`.
 - `set_my_commands` остаётся ограничением платформы MAX: публичные live-запросы `POST /me/commands` возвращают `404`.
-
-#### Проверка
-
-- `cargo fmt --all`
-- `cargo check --all-targets --all-features`
-- `cargo test`
-- `cargo test --features webhook --target-dir /tmp/opencode/maxoxide-target`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- Полный live API прогон на реальном MAX-боте: `89 PASS / 0 FAIL / 8 SKIP`
 
 ## [2.0.0] - 2026-04-27
 
@@ -173,14 +199,6 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
 - README examples now use builders and the new media helpers.
 - The crate version was bumped to `2.0.0`.
 
-#### Verification
-
-- `cargo fmt --all`
-- `cargo check --all-targets --all-features`
-- `cargo test`
-- `cargo test --features webhook`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
 ### RU
 
 #### Кратко о релизе
@@ -256,14 +274,6 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
 - Примеры README переведены на builders и новые media helpers.
 - Версия крейта повышена до `2.0.0`.
 
-#### Проверка
-
-- `cargo fmt --all`
-- `cargo check --all-targets --all-features`
-- `cargo test`
-- `cargo test --features webhook`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-
 ## [1.0.0] - 2026-03-25
 
 ### EN
@@ -328,13 +338,6 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 - `typing_on` returns a successful API response, but the client-side typing indicator was not reliably visible in live testing
 - `set_my_commands` remains experimental: live `POST /me/commands` requests returned `404`, and the public MAX REST docs do not currently expose a documented write endpoint for command menu updates
 
-#### Verification
-
-- `cargo fmt --all`
-- `cargo check --example live_api_test`
-- `cargo test`
-- The live API test was successfully completed against a real MAX bot during this release cycle
-
 ### RU
 
 #### Кратко о релизе
@@ -396,10 +399,3 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 - `request_geo_location` задокументирован в MAX, мобильный клиент показывает отправленную карточку геопозиции, но бот не получил соответствующий update в live polling
 - `typing_on` возвращает успешный API-ответ, но видимый индикатор набора текста в клиенте live-тестами не подтверждён
 - `set_my_commands` остаётся experimental helper: live-запросы `POST /me/commands` возвращают `404`, а публичный REST MAX сейчас не показывает документированного write-эндпоинта для меню команд
-
-#### Проверка
-
-- `cargo fmt --all`
-- `cargo check --example live_api_test`
-- `cargo test`
-- Живой тест на реальном MAX-боте был успешно пройден в рамках этого релиза

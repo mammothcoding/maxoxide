@@ -1,12 +1,90 @@
-use reqwest::Client;
+use reqwest::{Certificate, Client};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
-use tracing::debug;
+use std::time::Duration;
+use tokio::sync::OnceCell;
+use tracing::{debug, warn};
 
 use crate::errors::{MaxError, Result};
 use crate::types::*;
 
-const BASE_URL: &str = "https://platform-api.max.ru";
+const BASE_URL: &str = "https://platform-api2.max.ru";
+const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 30;
+const CA_FETCH_TIMEOUT_SECS: u64 = 10;
+const RUSSIAN_TRUSTED_ROOT_CA_URL: &str =
+    "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt";
+const RUSSIAN_TRUSTED_ROOT_CA_PEM: &[u8] = include_bytes!("certs/russian_trusted_root_ca.pem");
+
+fn default_client_builder() -> reqwest::ClientBuilder {
+    Client::builder().timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
+}
+
+fn certificates_from_bytes(bytes: &[u8]) -> std::result::Result<Vec<Certificate>, reqwest::Error> {
+    match Certificate::from_pem_bundle(bytes) {
+        Ok(certs) if !certs.is_empty() => Ok(certs),
+        Ok(_) | Err(_) => Certificate::from_der(bytes).map(|cert| vec![cert]),
+    }
+}
+
+fn embedded_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, reqwest::Error> {
+    Certificate::from_pem_bundle(RUSSIAN_TRUSTED_ROOT_CA_PEM)
+}
+
+fn build_client_with_certs(certs: Vec<Certificate>) -> std::result::Result<Client, reqwest::Error> {
+    default_client_builder().tls_certs_merge(certs).build()
+}
+
+fn build_client_with_embedded_ca() -> std::result::Result<Client, reqwest::Error> {
+    build_client_with_certs(embedded_russian_trusted_root_ca()?)
+}
+
+async fn download_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(CA_FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|err| format!("failed to build CA download client: {err}"))?;
+    let response = client
+        .get(RUSSIAN_TRUSTED_ROOT_CA_URL)
+        .send()
+        .await
+        .map_err(|err| format!("failed to download Russian Trusted Root CA: {err}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(format!(
+            "Russian Trusted Root CA download returned HTTP {status}"
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| format!("failed to read Russian Trusted Root CA body: {err}"))?;
+
+    certificates_from_bytes(&bytes)
+        .map_err(|err| format!("failed to parse Russian Trusted Root CA: {err}"))
+}
+
+async fn build_auto_client() -> Result<Client> {
+    match download_russian_trusted_root_ca().await {
+        Ok(certs) => match build_client_with_certs(certs) {
+            Ok(client) => {
+                debug!("Loaded Russian Trusted Root CA from {RUSSIAN_TRUSTED_ROOT_CA_URL}");
+                Ok(client)
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to build client with downloaded Russian Trusted Root CA: {err}; using embedded fallback"
+                );
+                build_client_with_embedded_ca().map_err(MaxError::Http)
+            }
+        },
+        Err(err) => {
+            warn!("{err}; using embedded Russian Trusted Root CA fallback");
+            build_client_with_embedded_ca().map_err(MaxError::Http)
+        }
+    }
+}
 
 fn parse_success_payload<T: DeserializeOwned>(
     text: &str,
@@ -53,6 +131,7 @@ pub struct Bot {
 struct BotInner {
     token: String,
     client: Client,
+    auto_client: Option<OnceCell<Client>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,23 +194,111 @@ fn comma_join_i64(values: impl IntoIterator<Item = i64>) -> String {
         .join(",")
 }
 
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'@' => {
+                encoded.push(*byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+
+    encoded
+}
+
+fn max_ru_link_last_segment(chat_link: &str) -> Option<&str> {
+    let without_fragment = chat_link.split('#').next().unwrap_or(chat_link);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment)
+        .trim_end_matches('/');
+    let path = without_query
+        .strip_prefix("https://max.ru/")
+        .or_else(|| without_query.strip_prefix("http://max.ru/"))
+        .or_else(|| without_query.strip_prefix("https://www.max.ru/"))
+        .or_else(|| without_query.strip_prefix("http://www.max.ru/"))
+        .or_else(|| without_query.strip_prefix("max.ru/"))
+        .or_else(|| without_query.strip_prefix("www.max.ru/"))?;
+
+    path.rsplit('/').find(|segment| !segment.is_empty())
+}
+
+fn push_chat_link_candidate(candidates: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !value.is_empty() && !candidates.iter().any(|candidate| candidate == &value) {
+        candidates.push(value);
+    }
+}
+
+fn push_chat_link_name_variants(candidates: &mut Vec<String>, value: &str) {
+    let value = value.trim().trim_matches('/');
+    if value.is_empty() {
+        return;
+    }
+
+    push_chat_link_candidate(candidates, value);
+    if let Some(without_at) = value.strip_prefix('@') {
+        push_chat_link_candidate(candidates, without_at);
+    } else if !value.contains("://") && !value.contains('/') {
+        push_chat_link_candidate(candidates, format!("@{value}"));
+    }
+}
+
+fn chat_link_candidates(chat_link: &str) -> Vec<String> {
+    let trimmed = chat_link.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let direct = trimmed
+        .split('#')
+        .next()
+        .unwrap_or(trimmed)
+        .split('?')
+        .next()
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    let mut candidates = Vec::new();
+    push_chat_link_candidate(&mut candidates, direct);
+
+    if let Some(username) = max_ru_link_last_segment(trimmed) {
+        push_chat_link_name_variants(&mut candidates, username);
+    } else {
+        push_chat_link_name_variants(&mut candidates, direct);
+    }
+
+    candidates
+}
+
 impl Bot {
     /// Create a new bot with the given token.
     pub fn new(token: impl Into<String>) -> Self {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = build_client_with_embedded_ca().expect("Failed to build HTTP client");
 
-        Self::with_client(token, client)
+        Bot {
+            inner: Arc::new(BotInner {
+                token: token.into(),
+                client,
+                auto_client: Some(OnceCell::new()),
+            }),
+        }
     }
 
     /// Create a new bot with a custom HTTP client.
+    ///
+    /// The provided client is used as-is. Automatic Russian Trusted Root CA
+    /// refresh is only applied to clients created by [`Bot::new`] and
+    /// [`Bot::from_env`].
     pub fn with_client(token: impl Into<String>, client: Client) -> Self {
         Bot {
             inner: Arc::new(BotInner {
                 token: token.into(),
                 client,
+                auto_client: None,
             }),
         }
     }
@@ -146,7 +313,10 @@ impl Bot {
         Self::new(token)
     }
 
-    /// Returns a reference to the raw HTTP client.
+    /// Returns a reference to the initially built raw HTTP client.
+    ///
+    /// For bots created by [`Bot::new`] or [`Bot::from_env`], API methods may
+    /// use an internally refreshed client after automatic CA loading succeeds.
     pub fn client(&self) -> &Client {
         &self.inner.client
     }
@@ -168,6 +338,17 @@ impl Bot {
         self.inner.token.clone()
     }
 
+    pub(crate) async fn api_client(&self) -> Result<&Client> {
+        match &self.inner.auto_client {
+            Some(auto_client) => {
+                auto_client
+                    .get_or_try_init(|| async { build_auto_client().await })
+                    .await
+            }
+            None => Ok(&self.inner.client),
+        }
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.get_with_query::<T, [(&str, &str); 0]>(path, []).await
     }
@@ -178,11 +359,13 @@ impl Bot {
         Q: serde::Serialize,
     {
         debug!("GET {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .get(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .get(url)
+            .header("Authorization", auth)
             .query(&query)
             .send()
             .await?;
@@ -205,11 +388,13 @@ impl Bot {
         Q: serde::Serialize,
     {
         debug!("POST {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .post(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .post(url)
+            .header("Authorization", auth)
             .query(&query)
             .json(body)
             .send()
@@ -223,11 +408,13 @@ impl Bot {
         body: &B,
     ) -> Result<T> {
         debug!("PUT {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .put(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .put(url)
+            .header("Authorization", auth)
             .json(body)
             .send()
             .await?;
@@ -240,11 +427,13 @@ impl Bot {
         body: &B,
     ) -> Result<T> {
         debug!("PATCH {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .patch(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .patch(url)
+            .header("Authorization", auth)
             .json(body)
             .send()
             .await?;
@@ -262,11 +451,13 @@ impl Bot {
         Q: serde::Serialize,
     {
         debug!("DELETE {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .delete(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .delete(url)
+            .header("Authorization", auth)
             .query(&query)
             .send()
             .await?;
@@ -551,6 +742,50 @@ impl Bot {
         self.get(&format!("/chats/{chat_id}")).await
     }
 
+    /// GET /chats/{chatLink} — Get channel info by public link or username.
+    ///
+    /// The public MAX API documents this endpoint for channels only. You may
+    /// pass a full `https://max.ru/...` URL, a channel public name, or a name
+    /// with a leading `@`.
+    pub async fn get_chat_by_link(&self, chat_link: &str) -> Result<Chat> {
+        let candidates = chat_link_candidates(chat_link);
+        if candidates.is_empty() {
+            return Err(MaxError::Api {
+                code: 0,
+                message: "chat_link is empty".into(),
+            });
+        }
+
+        let tried = candidates.join(", ");
+        let mut last_error = None;
+
+        for candidate in &candidates {
+            let encoded = percent_encode_path_segment(candidate);
+            match self.get(&format!("/chats/{encoded}")).await {
+                Ok(chat) => return Ok(chat),
+                Err(err) => {
+                    let should_try_next = matches!(err, MaxError::Api { code: 404, .. });
+                    if !should_try_next {
+                        return Err(err);
+                    }
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        match last_error {
+            Some(MaxError::Api { code: 404, message }) => Err(MaxError::Api {
+                code: 404,
+                message: format!("{message}. Tried variants: {tried}"),
+            }),
+            Some(err) => Err(err),
+            None => Err(MaxError::Api {
+                code: 0,
+                message: "chat_link is empty".into(),
+            }),
+        }
+    }
+
     /// PATCH /chats/{chatId} — Edit chat title/description.
     pub async fn edit_chat(&self, chat_id: i64, body: EditChatBody) -> Result<Chat> {
         self.patch(&format!("/chats/{chat_id}"), &body).await
@@ -566,9 +801,8 @@ impl Bot {
     /// The Max API expects values such as `"typing_on"`, `"sending_photo"`,
     /// `"sending_video"`, `"sending_audio"`, `"sending_file"` or `"mark_seen"`.
     ///
-    /// Note: live MAX tests currently show successful API responses for
-    /// `"typing_on"`, but the client-side typing indicator is not reliably
-    /// visible. Treat the visual effect as a current MAX platform gap.
+    /// Live MAX tests confirm that `"typing_on"` shows the typing indicator in
+    /// group chats.
     pub async fn send_action(&self, chat_id: i64, action: &str) -> Result<SimpleResult> {
         #[derive(serde::Serialize)]
         struct ActionBody<'a> {
@@ -871,11 +1105,13 @@ impl Bot {
         Q: serde::Serialize,
     {
         debug!("PUT {path}");
+        let url = self.url(path);
+        let auth = self.auth();
         let resp = self
-            .inner
-            .client
-            .put(self.url(path))
-            .header("Authorization", self.auth())
+            .api_client()
+            .await?
+            .put(url)
+            .header("Authorization", auth)
             .query(&query)
             .json(body)
             .send()
@@ -892,8 +1128,47 @@ impl std::fmt::Debug for Bot {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageRecipientQuery, parse_success_payload};
+    use super::{
+        MessageRecipientQuery, chat_link_candidates, parse_success_payload,
+        percent_encode_path_segment,
+    };
     use crate::types::Message;
+
+    #[test]
+    fn bot_uses_platform_api_v2_by_default() {
+        let bot = super::Bot::new("token");
+
+        assert_eq!(bot.url("/me"), "https://platform-api2.max.ru/me");
+    }
+
+    #[test]
+    fn chat_link_path_segment_is_percent_encoded() {
+        assert_eq!(
+            percent_encode_path_segment("https://max.ru/ru_3dnews"),
+            "https%3A%2F%2Fmax.ru%2Fru_3dnews"
+        );
+        assert_eq!(percent_encode_path_segment("@ru_3dnews"), "@ru_3dnews");
+    }
+
+    #[test]
+    fn chat_link_candidates_support_full_max_urls() {
+        assert_eq!(
+            chat_link_candidates("https://max.ru/ru_3dnews/"),
+            [
+                "https://max.ru/ru_3dnews".to_string(),
+                "ru_3dnews".to_string(),
+                "@ru_3dnews".to_string(),
+            ]
+        );
+        assert_eq!(
+            chat_link_candidates("@ru_3dnews"),
+            ["@ru_3dnews", "ru_3dnews"]
+        );
+        assert_eq!(
+            chat_link_candidates("ru_3dnews"),
+            ["ru_3dnews", "@ru_3dnews"]
+        );
+    }
 
     #[test]
     fn parse_success_payload_supports_direct_message_response() {

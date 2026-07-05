@@ -14,7 +14,8 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ## Features
 
-- ✅ Coverage of the published Max Bot REST API
+- ✅ Coverage of the published Max Bot REST API on the current `platform-api2.max.ru` host
+- ✅ Automatic Russian Trusted Root CA handling for the current MAX API TLS chain
 - ✅ Long polling and optional **Webhook** server via [axum](https://github.com/tokio-rs/axum)
 - ✅ Forward-compatible typed events (`Update`, `Message`, `Callback`, unknown update fallback)
 - ✅ `Dispatcher` with fluent handler registration, composable filters, startup hooks and scheduled tasks
@@ -29,11 +30,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = "2.1.0"
+maxoxide = "2.2.0"
 tokio    = { version = "1", features = ["full"] }
 
 # Enable the built-in axum webhook server:
-# maxoxide = { version = "2.1.0", features = ["webhook"] }
+# maxoxide = { version = "2.2.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -72,6 +73,16 @@ async fn main() {
 MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 ```
 
+## TLS trust for `platform-api2.max.ru`
+
+The current official MAX API host uses a certificate chain rooted in `Russian Trusted Root CA`. The default client created by `Bot::new()` and `Bot::from_env()` keeps TLS verification enabled and prepares that trust automatically:
+
+- first it tries to download the fresh PEM from the official `gu-st.ru` URL;
+- if that download fails, it falls back to the embedded `Russian Trusted Root CA` copy shipped with the crate;
+- the CA is merged with the normal trust roots, not used to disable certificate verification.
+
+If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its TLS configuration is used as-is.
+
 ## API methods
 
 | Method | Description |
@@ -91,6 +102,7 @@ MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 | `bot.get_video(video_token)` | Get video metadata and playback URLs |
 | `bot.answer_callback(body)` | Answer an inline button press |
 | `bot.get_chat(chat_id)` | Chat info |
+| `bot.get_chat_by_link(chat_link)` | Channel info by public link / username, e.g. `https://max.ru/channel`, `channel`, or `@channel`; availability depends on MAX Bot API access to that channel |
 | `bot.get_chats(…)` | List all group chats |
 | `bot.edit_chat(chat_id, body)` | Edit chat title / description |
 | `bot.leave_chat(chat_id)` | Leave a chat |
@@ -134,6 +146,7 @@ As of May 20, 2026, a full `examples/live_api_test.rs` run completed with `89 PA
 - `Button::RequestContact` is live-confirmed to deliver `vcf_info`, a valid `hash`, and `max_info`; `ContactPayload::validate_hash(token)` verifies the VCF hash. Some clients may still omit the legacy `vcf_phone` shortcut, so use `phones_from_vcf()` as a fallback.
 - `Button::RequestGeoLocation` is live-confirmed to deliver a structured `Attachment::Location` with `latitude` and `longitude`; the client can render the same shared position as a Yandex Maps card.
 - `bot.send_sender_action(chat_id, SenderAction::TypingOn)` is live-confirmed to show the typing indicator in group chats.
+- `bot.get_chat_by_link(...)` is implemented from the official API and accepts full `max.ru` URLs, plain names, and `@names`, but MAX may return `404 Chat not found by link` for public channels that are not resolvable by the Bot API for the current bot.
 - `Button::chat(...)` is modeled after the public MAX schema, but current live `POST /messages` requests with the documented `chat` button JSON return `400 Can't deserialize body`. The live harness treats this opt-in probe as a platform limitation, prints the outgoing JSON, and can capture raw `message_chat_created` updates if you already have a working chat button.
 - `bot.set_my_commands` is kept as an experimental helper, but the public MAX REST docs do not list a write endpoint for bot commands, and live `POST /me/commands` requests return `404 Path /me/commands is not recognized`.
 
@@ -300,11 +313,12 @@ At startup it asks in the terminal for:
 - update transport: `long_polling` or `webhook`
 - bot token
 - bot URL for the tester
+- optional public channel link for `bot.get_chat_by_link` (`https://max.ru/channel`, `channel`, or `@channel`)
 - optional webhook URL and secret
 - local webhook listen address when `webhook` transport is selected
 - optional local file path for `upload_file`
 - optional image, video and audio paths for media helper checks
-- HTTP timeout, polling timeout and delay between requests
+- polling timeout and delay between requests
 
 The harness then walks the tester through Max-client actions and records `PASS` / `FAIL` / `SKIP` for real API calls. It uses small delays between requests, drains the long-poll backlog before the run, and asks for explicit confirmation before destructive or non-reversible steps such as:
 

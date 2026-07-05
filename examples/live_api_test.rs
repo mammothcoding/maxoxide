@@ -9,7 +9,7 @@ use maxoxide::types::{
     NewMessageBody, PinMessageBody, RemoveMemberOptions, SendMessageOptions, SenderAction,
     SubscribeBody, Subscription, Update, UploadType,
 };
-use maxoxide::{Bot, reqwest::Client};
+use maxoxide::{Bot, MaxError};
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Write};
@@ -119,8 +119,7 @@ async fn main() -> AnyResult<()> {
 
     let lang = Language::prompt()?;
     let config = Config::prompt(lang)?;
-    let client = Client::builder().timeout(config.http_timeout).build()?;
-    let bot = Bot::with_client(config.token.clone(), client);
+    let bot = Bot::new(config.token.clone());
     let webhook_updates = if config.transport == UpdateTransport::Webhook {
         Some(start_webhook_receiver(&config).await?)
     } else {
@@ -139,17 +138,15 @@ async fn main() -> AnyResult<()> {
     print_section(tr(lang, "Live Test", "Живой тест"));
     match lang {
         Language::English => println!(
-            "Interactive real-API run with transport {}, request delay {} ms, HTTP timeout {} s, polling timeout {} s.",
+            "Interactive real-API run with transport {}, request delay {} ms, polling timeout {} s.",
             config.transport.as_str(),
             config.request_delay.as_millis(),
-            config.http_timeout.as_secs(),
             config.poll_timeout
         ),
         Language::Russian => println!(
-            "Интерактивный прогон по реальному API: транспорт {}, задержка между запросами {} мс, HTTP timeout {} c, polling timeout {} c.",
+            "Интерактивный прогон по реальному API: транспорт {}, задержка между запросами {} мс, polling timeout {} c.",
             config.transport.as_str(),
             config.request_delay.as_millis(),
-            config.http_timeout.as_secs(),
             config.poll_timeout
         ),
     }
@@ -188,6 +185,19 @@ async fn main() -> AnyResult<()> {
             list.chats
         })
         .unwrap_or_default();
+
+    if let Some(channel_link) = config.channel_link.clone() {
+        run_get_chat_by_link_probe(&mut harness, &mut report, &channel_link).await;
+    } else {
+        report.skip(
+            "bot.get_chat_by_link",
+            tr(
+                lang,
+                "tester did not provide a public channel link",
+                "тестер не указал публичную ссылку канала",
+            ),
+        );
+    }
 
     let disabled_webhook_subscriptions = match config.transport {
         UpdateTransport::LongPolling => {
@@ -333,6 +343,44 @@ async fn main() -> AnyResult<()> {
 
     report.print_summary(lang);
     Ok(())
+}
+
+async fn run_get_chat_by_link_probe(
+    harness: &mut Harness,
+    report: &mut Report,
+    channel_link: &str,
+) {
+    let lang = harness.lang;
+    harness.pause().await;
+    print_case("bot.get_chat_by_link");
+
+    match harness.bot.clone().get_chat_by_link(channel_link).await {
+        Ok(chat) => {
+            report.pass("bot.get_chat_by_link", tr(lang, "ok", "ok"));
+            println!("   PASS");
+            print_known_chats(std::slice::from_ref(&chat), lang);
+        }
+        Err(err) if is_chat_link_not_found_error(&err) => {
+            let detail = match lang {
+                Language::English => {
+                    format!("channel link is not resolvable by MAX Bot API: {err}")
+                }
+                Language::Russian => {
+                    format!("ссылка канала не находится через MAX Bot API: {err}")
+                }
+            };
+            report.skip("bot.get_chat_by_link", detail.clone());
+            println!("   SKIP: {detail}");
+        }
+        Err(err) => {
+            let detail = err.to_string();
+            report.fail("bot.get_chat_by_link", detail.clone());
+            println!("   FAIL: {detail}");
+            if let Some(hint) = tls_trust_hint(&err, lang) {
+                println!("   {hint}");
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -3235,6 +3283,7 @@ struct Config {
     transport: UpdateTransport,
     token: String,
     bot_link: Option<String>,
+    channel_link: Option<String>,
     webhook_url: Option<String>,
     webhook_secret: Option<String>,
     webhook_listen_addr: Option<String>,
@@ -3244,7 +3293,6 @@ struct Config {
     upload_video_path: Option<PathBuf>,
     upload_audio_path: Option<PathBuf>,
     request_delay: Duration,
-    http_timeout: Duration,
     poll_timeout: u32,
 }
 
@@ -3268,6 +3316,14 @@ impl Config {
                 lang,
                 "Bot URL for the tester (optional)",
                 "URL бота для тестера (необязательно)",
+            ),
+        )?;
+        let channel_link = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Public channel link for bot.get_chat_by_link (optional, e.g. https://max.ru/channel, channel, or @channel)",
+                "Публичная ссылка канала для bot.get_chat_by_link (необязательно, например https://max.ru/channel, channel или @channel)",
             ),
         )?;
         let webhook_url_label = if transport == UpdateTransport::Webhook {
@@ -3371,11 +3427,6 @@ impl Config {
             ),
             400,
         )?;
-        let http_timeout_secs = prompt_u64(
-            lang,
-            tr(lang, "HTTP timeout in seconds", "HTTP timeout в секундах"),
-            15,
-        )?;
         let poll_timeout = prompt_u32(
             lang,
             tr(
@@ -3391,6 +3442,7 @@ impl Config {
             token,
             transport,
             bot_link,
+            channel_link,
             webhook_url,
             webhook_secret,
             webhook_listen_addr,
@@ -3400,7 +3452,6 @@ impl Config {
             upload_video_path,
             upload_audio_path,
             request_delay: Duration::from_millis(request_delay_ms),
-            http_timeout: Duration::from_secs(http_timeout_secs.max(1)),
             poll_timeout: poll_timeout.max(1),
         })
     }
@@ -3659,8 +3710,12 @@ impl Harness {
                 Some(value)
             }
             Err(err) => {
-                report.fail(name, err.to_string());
-                println!("   FAIL: {err}");
+                let detail = err.to_string();
+                report.fail(name, detail.clone());
+                println!("   FAIL: {detail}");
+                if let Some(hint) = tls_trust_hint(&err, self.lang) {
+                    println!("   {hint}");
+                }
                 None
             }
         }
@@ -4194,6 +4249,30 @@ fn is_live_command_text(text: &str) -> bool {
 
 fn is_chat_button_platform_rejection(error: &str) -> bool {
     error.contains("API error 400") && error.contains("Can't deserialize body")
+}
+
+fn is_chat_link_not_found_error(error: &MaxError) -> bool {
+    matches!(
+        error,
+        MaxError::Api { code: 404, message } if message.contains("Chat not found by link")
+    )
+}
+
+fn tls_trust_hint(error: &MaxError, lang: Language) -> Option<&'static str> {
+    let message = error.to_string();
+    let is_tls_trust_error = message.contains("UnknownIssuer")
+        || message.contains("invalid peer certificate")
+        || message.contains("unable to get local issuer certificate");
+
+    if is_tls_trust_error {
+        Some(tr(
+            lang,
+            "TLS trust failed. maxoxide tries to download Russian Trusted Root CA automatically and falls back to the embedded copy; if this still fails, check proxy/TLS interception or install Russian Trusted Root CA in the system trust store.",
+            "TLS trust не прошёл. maxoxide автоматически скачивает Russian Trusted Root CA и fallback-ом использует встроенную копию; если ошибка осталась, проверьте proxy/TLS interception или установите Russian Trusted Root CA в системное хранилище.",
+        ))
+    } else {
+        None
+    }
 }
 
 fn is_add_admins_not_participant(error: &str) -> bool {

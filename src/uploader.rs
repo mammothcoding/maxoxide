@@ -556,7 +556,8 @@ impl Bot {
         let form = multipart::Form::new().part("data", part);
 
         let resp = self
-            .client()
+            .api_client()
+            .await?
             .post(&endpoint.url)
             .multipart(form)
             .send()

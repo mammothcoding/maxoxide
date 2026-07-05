@@ -5,10 +5,10 @@
 use crate::{
     dispatcher::Filter,
     types::{
-        AnswerCallbackBody, Attachment, AttachmentKind, Button, Callback, ChatAdminPermission,
-        ChatMember, ChatStatus, ChatType, KeyboardPayload, MarkupElement, Message, MessageBody,
-        MessageFormat, NewAttachment, NewMessageBody, PhotoToken, Recipient, SenderAction,
-        SubscribeBody, Update, UploadType, User,
+        AnswerCallbackBody, Attachment, AttachmentKind, Button, Callback, Chat,
+        ChatAdminPermission, ChatMember, ChatStatus, ChatType, KeyboardPayload, MarkupElement,
+        Message, MessageBody, MessageFormat, NewAttachment, NewMessageBody, PhotoToken, Recipient,
+        SenderAction, SubscribeBody, Update, UploadType, User,
     },
 };
 use std::collections::BTreeMap;
@@ -285,6 +285,32 @@ fn test_chat_status_preserves_unknown_values() {
 }
 
 #[test]
+fn test_chat_deserializes_new_channel_fields() {
+    let chat: Chat = serde_json::from_str(
+        r#"{
+            "chat_id": -42,
+            "type": "channel",
+            "status": "active",
+            "title": "News",
+            "icon": null,
+            "last_event_time": 1700000000,
+            "participants_count": 3,
+            "owner_id": 1,
+            "participants": {"1": 1700000000, "2": 1700000001},
+            "is_public": true,
+            "link": "@news",
+            "description": "Channel",
+            "messages_count": 123,
+            "pinned_message": null
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(chat.participants.as_ref().unwrap()["1"], 1_700_000_000);
+    assert_eq!(chat.messages_count, Some(123));
+}
+
+#[test]
 fn test_upload_type_serialization() {
     // Ensure no "photo" leaks — Max removed it, only "image" is valid.
     assert_eq!(
@@ -319,6 +345,14 @@ fn test_chat_admin_permission_serde() {
     let unknown: ChatAdminPermission = serde_json::from_str(r#""future_perm""#).unwrap();
     assert_eq!(unknown, ChatAdminPermission::Unknown("future_perm".into()));
     assert_eq!(serde_json::to_string(&unknown).unwrap(), r#""future_perm""#);
+
+    let edit: ChatAdminPermission = serde_json::from_str(r#""edit""#).unwrap();
+    assert_eq!(edit, ChatAdminPermission::Edit);
+    assert_eq!(serde_json::to_string(&edit).unwrap(), r#""edit""#);
+
+    let delete: ChatAdminPermission = serde_json::from_str(r#""delete""#).unwrap();
+    assert_eq!(delete, ChatAdminPermission::Delete);
+    assert_eq!(serde_json::to_string(&delete).unwrap(), r#""delete""#);
 }
 
 #[test]
