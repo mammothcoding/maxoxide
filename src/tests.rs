@@ -3,6 +3,7 @@
 //! Run with: `cargo test`
 
 use crate::{
+    RussianTlsExt,
     dispatcher::Filter,
     types::{
         AnswerCallbackBody, Attachment, AttachmentKind, Button, Callback, Chat,
@@ -11,7 +12,7 @@ use crate::{
         SenderAction, SubscribeBody, Update, UploadType, User,
     },
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 // ────────────────────────────────────────────────────────────
 // Helper: construct minimal Message
@@ -132,6 +133,36 @@ fn test_update_bot_started_roundtrip() {
 
     let update: Update = serde_json::from_str(json).unwrap();
     assert!(matches!(update, Update::BotStarted { chat_id: 99, .. }));
+}
+
+#[test]
+fn test_update_chat_id_helper() {
+    let message_update = Update::MessageCreated {
+        timestamp: 1,
+        message: make_message(42, "hello"),
+    };
+    let bot_added = Update::BotAdded {
+        timestamp: 1,
+        chat_id: -100,
+        user: make_user(3, "Carol"),
+        is_channel: Some(false),
+    };
+    let callback_without_message = make_callback("btn:ok");
+
+    assert_eq!(message_update.chat_id(), Some(42));
+    assert_eq!(bot_added.chat_id(), Some(-100));
+    assert_eq!(callback_without_message.chat_id(), None);
+}
+
+#[test]
+fn test_russian_tls_builder_builds_client() {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .russian_tls()
+        .expect("embedded Russian Trusted Root CA should parse")
+        .build()
+        .expect("client should build with Russian Trusted Root CA");
 }
 
 #[test]

@@ -38,6 +38,25 @@ fn build_client_with_embedded_ca() -> std::result::Result<Client, reqwest::Error
     build_client_with_certs(embedded_russian_trusted_root_ca()?)
 }
 
+/// Extension methods for building custom MAX-compatible `reqwest` clients.
+///
+/// Use this when you need custom `reqwest::ClientBuilder` settings such as
+/// `timeout(...)` or `no_proxy()` together with the Russian Trusted Root CA
+/// required by the current `platform-api2.max.ru` TLS chain.
+pub trait RussianTlsExt {
+    /// Merge the embedded Russian Trusted Root CA into this builder.
+    ///
+    /// This keeps certificate verification enabled and preserves all settings
+    /// already applied to the builder.
+    fn russian_tls(self) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error>;
+}
+
+impl RussianTlsExt for reqwest::ClientBuilder {
+    fn russian_tls(self) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error> {
+        Ok(self.tls_certs_merge(embedded_russian_trusted_root_ca()?))
+    }
+}
+
 async fn download_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(CA_FETCH_TIMEOUT_SECS))
@@ -726,6 +745,16 @@ impl Bot {
     // ────────────────────────────────────────────────
 
     /// GET /chats — Get all group chats the bot is a member of.
+    ///
+    /// Deprecated by MAX: since June 2026 this endpoint is no longer
+    /// supported, and MAX announced it will be disabled in August 2026. Store
+    /// `chat_id` values from updates such as `bot_added`, `bot_started`, and
+    /// message events in your own storage, then use [`Bot::get_chat`] and other
+    /// chat-id-based methods.
+    #[deprecated(
+        since = "2.3.0",
+        note = "MAX stopped supporting GET /chats. Store chat_id values from updates and use chat-id-based methods instead."
+    )]
     pub async fn get_chats(&self, count: Option<u32>, marker: Option<i64>) -> Result<ChatList> {
         let mut params: Vec<(&str, String)> = vec![];
         if let Some(c) = count {

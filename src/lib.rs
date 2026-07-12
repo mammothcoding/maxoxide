@@ -74,7 +74,7 @@ pub mod webhook;
 mod tests;
 
 // Re-export the most commonly used items at the crate root.
-pub use bot::Bot;
+pub use bot::{Bot, RussianTlsExt};
 pub use dispatcher::{
     Context, Dispatcher, Filter, RawUpdateContext, ScheduledTaskContext, StartContext,
 };

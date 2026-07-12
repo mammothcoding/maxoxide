@@ -1748,6 +1748,35 @@ impl Update {
         self.timestamp().unwrap_or_default()
     }
 
+    /// Returns the `chat_id` carried by this update, when the update has one.
+    ///
+    /// This is useful for maintaining your own chat registry after MAX
+    /// deprecated `GET /chats`: store chat IDs from `bot_added`, `bot_started`,
+    /// message updates, and remove them on `bot_removed` when appropriate.
+    pub fn chat_id(&self) -> Option<i64> {
+        match self {
+            Self::MessageCreated { message, .. } | Self::MessageEdited { message, .. } => {
+                Some(message.chat_id())
+            }
+            Self::MessageEditedMissing { .. } => None,
+            Self::MessageRemoved { chat_id, .. }
+            | Self::BotStarted { chat_id, .. }
+            | Self::BotAdded { chat_id, .. }
+            | Self::BotRemoved { chat_id, .. }
+            | Self::BotStopped { chat_id, .. }
+            | Self::DialogCleared { chat_id, .. }
+            | Self::DialogMuted { chat_id, .. }
+            | Self::DialogUnmuted { chat_id, .. }
+            | Self::DialogRemoved { chat_id, .. }
+            | Self::UserAdded { chat_id, .. }
+            | Self::UserRemoved { chat_id, .. }
+            | Self::ChatTitleChanged { chat_id, .. } => Some(*chat_id),
+            Self::MessageCallback { message, .. } => message.as_ref().map(Message::chat_id),
+            Self::MessageChatCreated { chat, .. } => Some(chat.chat_id),
+            Self::Unknown { .. } => None,
+        }
+    }
+
     pub fn update_type(&self) -> Option<&str> {
         match self {
             Self::MessageCreated { .. } => Some("message_created"),

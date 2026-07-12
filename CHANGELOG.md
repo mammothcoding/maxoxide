@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.3.0] - 2026-07-13
+
+### EN
+
+#### Release summary
+
+This compatible release adds a custom-client TLS helper for the current MAX API certificate chain and removes maxoxide's own live-test dependency on the deprecated `GET /chats` endpoint.
+
+#### Added
+
+- Added `RussianTlsExt::russian_tls()` for `reqwest::ClientBuilder`, so custom clients can keep settings such as `timeout(...)` and `no_proxy()` while adding the embedded `Russian Trusted Root CA`.
+- Added `Update::chat_id()` to extract a chat ID from typed updates when one is present. This helps applications maintain their own chat registry after MAX deprecated `GET /chats`.
+
+#### Changed
+
+- Bumped the crate version to `2.3.0`.
+- `examples/live_api_test.rs` no longer calls `bot.get_chats` at startup. The optional group phase now uses the `/group_live` update or manual `chat_id` entry.
+- README and README.ru now document that `Bot::new()` and `Bot::from_env()` configure Russian TLS automatically, while `Bot::with_client(...)` custom clients should call `.russian_tls()` during `reqwest::ClientBuilder` setup.
+
+#### Deprecated
+
+- Deprecated `Bot::get_chats(...)`. MAX stopped supporting `GET /chats` in June 2026 and announced shutdown for August 2026. Store `chat_id` values from updates such as `bot_added`, `bot_started`, and message events in your own storage, remove them on `bot_removed`, and use chat-id-based methods.
+
+### RU
+
+#### Кратко о релизе
+
+Совместимый релиз добавляет TLS-helper для custom clients под текущую цепочку сертификатов MAX API и убирает собственную зависимость live-теста maxoxide от deprecated endpoint `GET /chats`.
+
+#### Добавлено
+
+- Добавлен `RussianTlsExt::russian_tls()` для `reqwest::ClientBuilder`, чтобы custom clients сохраняли настройки вроде `timeout(...)` и `no_proxy()` и при этом добавляли встроенный `Russian Trusted Root CA`.
+- Добавлен `Update::chat_id()` для извлечения chat ID из typed updates, если update его содержит. Это помогает приложениям вести собственный реестр чатов после deprecation `GET /chats`.
+
+#### Изменено
+
+- Версия крейта повышена до `2.3.0`.
+- `examples/live_api_test.rs` больше не вызывает `bot.get_chats` на старте. Опциональный групповой этап использует update от `/group_live` или ручной ввод `chat_id`.
+- README и README.ru теперь документируют, что `Bot::new()` и `Bot::from_env()` настраивают Russian TLS автоматически, а custom clients для `Bot::with_client(...)` должны вызывать `.russian_tls()` на этапе настройки `reqwest::ClientBuilder`.
+
+#### Deprecated
+
+- Deprecated `Bot::get_chats(...)`. MAX перестал поддерживать `GET /chats` с июня 2026 года и объявил отключение в августе 2026. Сохраняйте `chat_id` из updates вроде `bot_added`, `bot_started` и message events в собственной БД, удаляйте их на `bot_removed` и используйте методы по `chat_id`.
+
 ## [2.2.0] - 2026-07-05
 
 ### EN

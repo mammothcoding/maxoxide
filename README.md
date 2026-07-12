@@ -30,11 +30,11 @@ inspired by [teloxide](https://github.com/teloxide/teloxide).
 
 ```toml
 [dependencies]
-maxoxide = "2.2.0"
+maxoxide = "2.3.0"
 tokio    = { version = "1", features = ["full"] }
 
 # Enable the built-in axum webhook server:
-# maxoxide = { version = "2.2.0", features = ["webhook"] }
+# maxoxide = { version = "2.3.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -75,13 +75,29 @@ MAX_BOT_TOKEN=your_token cargo run --example echo_bot
 
 ## TLS trust for `platform-api2.max.ru`
 
-The current official MAX API host uses a certificate chain rooted in `Russian Trusted Root CA`. The default client created by `Bot::new()` and `Bot::from_env()` keeps TLS verification enabled and prepares that trust automatically:
+The current official MAX API host uses a certificate chain rooted in `Russian Trusted Root CA`. `Bot::new()` and `Bot::from_env()` keep TLS verification enabled and prepare that trust automatically:
 
 - first it tries to download the fresh PEM from the official `gu-st.ru` URL;
 - if that download fails, it falls back to the embedded `Russian Trusted Root CA` copy shipped with the crate;
 - the CA is merged with the normal trust roots, not used to disable certificate verification.
 
-If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its TLS configuration is used as-is.
+If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its TLS configuration is used as-is. Add the embedded Russian root CA to custom clients with `RussianTlsExt::russian_tls()`:
+
+```rust
+use maxoxide::{Bot, RussianTlsExt, reqwest::Client};
+use std::time::Duration;
+
+# fn example(token: String) -> Result<Bot, reqwest::Error> {
+let client = Client::builder()
+    .timeout(Duration::from_secs(30))
+    .no_proxy()
+    .russian_tls()?
+    .build()?;
+
+let bot = Bot::with_client(token, client);
+# Ok(bot)
+# }
+```
 
 ## API methods
 
@@ -93,8 +109,8 @@ If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its T
 | `bot.send_text_to_user(user_id, text)` | Send plain text to a user by global MAX `user_id` |
 | `bot.send_markdown_to_chat(chat_id, text)` | Send Markdown to a dialog/group/channel by `chat_id` |
 | `bot.send_markdown_to_user(user_id, text)` | Send Markdown to a user by global MAX `user_id` |
-| `bot.send_message_to_chat(chat_id, body)` | Send message with attachments / keyboard by `chat_id` |
-| `bot.send_message_to_user(user_id, body)` | Send message with attachments / keyboard by global MAX `user_id` |
+| `bot.send_message_to_chat(chat_id, body)` | Send message with attachments / keyboard by `chat_id` (`request_contact` / `request_geo_location` buttons are live-confirmed; `chat` button is currently platform-limited) |
+| `bot.send_message_to_user(user_id, body)` | Send message with attachments / keyboard by global MAX `user_id` (`request_contact` / `request_geo_location` buttons are live-confirmed; `chat` button is currently platform-limited) |
 | `bot.send_message_to_chat_with_options(chat_id, body, options)` | Send with query options such as `disable_link_preview` |
 | `bot.edit_message(mid, body)` | Edit a message |
 | `bot.delete_message(mid)` | Delete a message |
@@ -102,8 +118,8 @@ If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its T
 | `bot.get_video(video_token)` | Get video metadata and playback URLs |
 | `bot.answer_callback(body)` | Answer an inline button press |
 | `bot.get_chat(chat_id)` | Chat info |
-| `bot.get_chat_by_link(chat_link)` | Channel info by public link / username, e.g. `https://max.ru/channel`, `channel`, or `@channel`; availability depends on MAX Bot API access to that channel |
-| `bot.get_chats(…)` | List all group chats |
+| `bot.get_chat_by_link(chat_link)` | Channel info by public link / username, e.g. `https://max.ru/channel`, `channel`, or `@channel` (may return `404 Chat not found by link` when the channel is unavailable to the bot) |
+| `bot.get_chats(…)` | Deprecated: MAX stopped supporting `GET /chats`; store `chat_id` values from updates instead |
 | `bot.edit_chat(chat_id, body)` | Edit chat title / description |
 | `bot.leave_chat(chat_id)` | Leave a chat |
 | `bot.get_members(…)` | List members |
@@ -116,7 +132,7 @@ If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its T
 | `bot.remove_admin(chat_id, user_id)` | Revoke admin rights |
 | `bot.pin_message(…)` | Pin a message |
 | `bot.unpin_message(…)` | Unpin |
-| `bot.send_sender_action(chat_id, action)` | Send a typed sender action |
+| `bot.send_sender_action(chat_id, action)` | Send a typed sender action (`typing_on` is live-confirmed as visible in group chats) |
 | `bot.get_updates_with_types(…, types)` | Long polling limited to selected update types |
 | `bot.get_updates_raw_with_types(…, types)` | Raw JSON long polling limited to selected update types |
 | `bot.subscribe(body)` | Register a webhook |
@@ -127,7 +143,7 @@ If you provide your own `reqwest::Client` through `Bot::with_client(...)`, its T
 | `bot.send_video_to_chat(...)` | Upload and send a video |
 | `bot.send_audio_to_chat(...)` | Upload and send audio |
 | `bot.send_file_to_chat(...)` | Upload and send a generic file |
-| `bot.set_my_commands(commands)` | Experimental: public MAX API currently returns `404` for `/me/commands` |
+| `bot.set_my_commands(commands)` | Experimental: no public write endpoint is documented; live API currently returns `404` for `/me/commands` |
 
 ## User ID vs Chat ID
 
@@ -139,16 +155,32 @@ These two IDs are different and should not be used interchangeably:
 - Use `send_text_to_chat(chat_id, ...)` / `send_message_to_chat(chat_id, ...)` when you already know the dialog or group.
 - Use `send_text_to_user(user_id, ...)` / `send_message_to_user(user_id, ...)` when you only know the user's global MAX ID.
 
-## Live-tested MAX behavior
+## Replacing Deprecated `get_chats`
 
-As of May 20, 2026, a full `examples/live_api_test.rs` run completed with `89 PASS / 0 FAIL / 8 SKIP`. The skipped steps are either explicit tester choices or current MAX platform limitations:
+MAX stopped supporting `GET /chats` in June 2026 and announced shutdown for August 2026. There is no replacement endpoint that returns the full chat/channel list for a bot. Store `chat_id` values from updates in your own database, remove them on `bot_removed`, then call `get_chat(chat_id)` and other chat-id-based methods.
 
-- `Button::RequestContact` is live-confirmed to deliver `vcf_info`, a valid `hash`, and `max_info`; `ContactPayload::validate_hash(token)` verifies the VCF hash. Some clients may still omit the legacy `vcf_phone` shortcut, so use `phones_from_vcf()` as a fallback.
-- `Button::RequestGeoLocation` is live-confirmed to deliver a structured `Attachment::Location` with `latitude` and `longitude`; the client can render the same shared position as a Yandex Maps card.
-- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` is live-confirmed to show the typing indicator in group chats.
-- `bot.get_chat_by_link(...)` is implemented from the official API and accepts full `max.ru` URLs, plain names, and `@names`, but MAX may return `404 Chat not found by link` for public channels that are not resolvable by the Bot API for the current bot.
-- `Button::chat(...)` is modeled after the public MAX schema, but current live `POST /messages` requests with the documented `chat` button JSON return `400 Can't deserialize body`. The live harness treats this opt-in probe as a platform limitation, prints the outgoing JSON, and can capture raw `message_chat_created` updates if you already have a working chat button.
-- `bot.set_my_commands` is kept as an experimental helper, but the public MAX REST docs do not list a write endpoint for bot commands, and live `POST /me/commands` requests return `404 Path /me/commands is not recognized`.
+```rust
+use maxoxide::{Context, Dispatcher};
+use maxoxide::types::Update;
+
+# fn configure(dp: &mut Dispatcher) {
+dp.on_bot_added(|ctx: Context| async move {
+    if let Update::BotAdded { chat_id, .. } = &ctx.update {
+        // Store chat_id in your database.
+    }
+    Ok(())
+});
+
+dp.on_bot_removed(|ctx: Context| async move {
+    if let Update::BotRemoved { chat_id, .. } = &ctx.update {
+        // Remove chat_id from your database.
+    }
+    Ok(())
+});
+# }
+```
+
+For generic handlers, `Update::chat_id()` returns the chat ID when the update carries one.
 
 ## Dispatcher filters
 
@@ -208,6 +240,8 @@ let keyboard = KeyboardPayload {
 let body = NewMessageBody::empty().with_keyboard(keyboard);
 bot.send_message_to_chat(chat_id, body).await?;
 ```
+
+Request-contact buttons are live-confirmed to deliver `vcf_info`, `hash`, and `max_info` (`ContactPayload::validate_hash(token)` verifies the VCF hash; use `phones_from_vcf()` when `vcf_phone` is missing). Request-location buttons are live-confirmed to deliver structured `Attachment::Location` coordinates. `Button::chat(...)` is kept for the documented MAX schema, but current live `POST /messages` rejects the documented `chat` button JSON with `400 Can't deserialize body`.
 
 ## File upload
 
@@ -278,19 +312,21 @@ maxoxide/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          — public API & re-exports
-│   ├── bot.rs          — Bot + all HTTP methods
+│   ├── bot.rs          — Bot, HTTP methods, TLS helpers
 │   ├── uploader.rs     — two-step file upload helpers
 │   ├── dispatcher.rs   — Dispatcher, Filter, Context
 │   ├── errors.rs       — MaxError
 │   ├── webhook.rs      — axum webhook server (feature = "webhook")
 │   ├── tests.rs        — unit tests
-│   └── types.rs        — all types (User, Chat, Message, Update, …)
+│   ├── types.rs        — all types (User, Chat, Message, Update, …)
+│   └── certs/
+│       └── russian_trusted_root_ca.pem
 └── examples/
     ├── echo_bot.rs
     ├── dispatcher_filters_bot.rs
     ├── keyboard_bot.rs
-    ├── media_bot.rs
     ├── live_api_test.rs
+    ├── media_bot.rs
     └── webhook_bot.rs  (feature = "webhook")
 ```
 

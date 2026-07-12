@@ -175,17 +175,6 @@ async fn main() -> AnyResult<()> {
         ),
     }
 
-    let known_chats = harness
-        .api_case(&mut report, "bot.get_chats", |bot| async move {
-            bot.get_chats(Some(100), None).await
-        })
-        .await
-        .map(|list| {
-            print_known_chats(&list.chats, lang);
-            list.chats
-        })
-        .unwrap_or_default();
-
     if let Some(channel_link) = config.channel_link.clone() {
         run_get_chat_by_link_probe(&mut harness, &mut report, &channel_link).await;
     } else {
@@ -317,14 +306,7 @@ async fn main() -> AnyResult<()> {
         .await?;
         run_webhook_phase(&mut harness, &mut report, &config).await?;
         run_commands_phase(&mut harness, &mut report, lang).await?;
-        run_group_phase(
-            &mut harness,
-            &mut report,
-            &config,
-            &known_chats,
-            private_phase.user_id,
-        )
-        .await?;
+        run_group_phase(&mut harness, &mut report, &config, private_phase.user_id).await?;
         Ok::<(), Box<dyn Error>>(())
     }
     .await;
@@ -2417,7 +2399,6 @@ async fn run_group_phase(
     harness: &mut Harness,
     report: &mut Report,
     config: &Config,
-    known_chats: &[Chat],
     known_user_id: Option<i64>,
 ) -> AnyResult<()> {
     let lang = config.lang;
@@ -2527,27 +2508,14 @@ async fn run_group_phase(
 
     let group_chat_id = match activated_chat_id {
         Some(chat_id) => Some(chat_id),
-        None => {
-            if !known_chats.is_empty() {
-                println!(
-                    "{}",
-                    tr(
-                        lang,
-                        "Known group chats from bot.get_chats:",
-                        "Известные групповые чаты из bot.get_chats:",
-                    )
-                );
-                print_known_chats(known_chats, lang);
-            }
-            prompt_optional_i64(
+        None => prompt_optional_i64(
+            lang,
+            tr(
                 lang,
-                tr(
-                    lang,
-                    "Enter a group chat_id manually to continue the group phase, or leave blank to skip",
-                    "Введите group chat_id вручную, чтобы продолжить групповой этап, или оставьте поле пустым для пропуска",
-                ),
-            )?
-        }
+                "Enter a group chat_id manually to continue the group phase, or leave blank to skip",
+                "Введите group chat_id вручную, чтобы продолжить групповой этап, или оставьте поле пустым для пропуска",
+            ),
+        )?,
     };
 
     let Some(group_chat_id) = group_chat_id else {

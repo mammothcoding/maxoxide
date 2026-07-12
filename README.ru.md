@@ -30,11 +30,11 @@ Readme на разных языках:
 
 ```toml
 [dependencies]
-maxoxide = "2.2.0"
+maxoxide = "2.3.0"
 tokio    = { version = "1", features = ["full"] }
 
 # Включить встроенный webhook-сервер на axum:
-# maxoxide = { version = "2.2.0", features = ["webhook"] }
+# maxoxide = { version = "2.3.0", features = ["webhook"] }
 ```
 
 ```rust
@@ -75,13 +75,29 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 
 ## TLS trust для `platform-api2.max.ru`
 
-Текущий официальный host MAX API использует цепочку сертификатов до `Russian Trusted Root CA`. Default client, который создают `Bot::new()` и `Bot::from_env()`, оставляет TLS verification включённой и готовит доверие автоматически:
+Текущий официальный host MAX API использует цепочку сертификатов до `Russian Trusted Root CA`. `Bot::new()` и `Bot::from_env()` оставляют TLS verification включённой и готовят доверие автоматически:
 
 - сначала пытается скачать свежий PEM с официального URL `gu-st.ru`;
 - если скачать не получилось, использует встроенную копию `Russian Trusted Root CA`, поставляемую вместе с crate;
 - CA добавляется к обычным trust roots, а не отключает проверку сертификатов.
 
-Если передать собственный `reqwest::Client` через `Bot::with_client(...)`, используется его TLS-конфигурация без неявной подмены.
+Если передать собственный `reqwest::Client` через `Bot::with_client(...)`, используется его TLS-конфигурация без неявной подмены. Добавьте встроенный Russian root CA в custom client через `RussianTlsExt::russian_tls()`:
+
+```rust
+use maxoxide::{Bot, RussianTlsExt, reqwest::Client};
+use std::time::Duration;
+
+# fn example(token: String) -> Result<Bot, reqwest::Error> {
+let client = Client::builder()
+    .timeout(Duration::from_secs(30))
+    .no_proxy()
+    .russian_tls()?
+    .build()?;
+
+let bot = Bot::with_client(token, client);
+# Ok(bot)
+# }
+```
 
 ## Методы API
 
@@ -93,8 +109,8 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.send_text_to_user(user_id, text)` | Отправить текст пользователю по глобальному MAX `user_id` |
 | `bot.send_markdown_to_chat(chat_id, text)` | Отправить Markdown в диалог/группу/канал по `chat_id` |
 | `bot.send_markdown_to_user(user_id, text)` | Отправить Markdown пользователю по глобальному MAX `user_id` |
-| `bot.send_message_to_chat(chat_id, body)` | Отправить сообщение с вложениями / кнопками по `chat_id` |
-| `bot.send_message_to_user(user_id, body)` | Отправить сообщение с вложениями / кнопками по глобальному MAX `user_id` |
+| `bot.send_message_to_chat(chat_id, body)` | Отправить сообщение с вложениями / кнопками по `chat_id` (`request_contact` / `request_geo_location` live-подтверждены; `chat`-кнопка сейчас ограничена платформой) |
+| `bot.send_message_to_user(user_id, body)` | Отправить сообщение с вложениями / кнопками по глобальному MAX `user_id` (`request_contact` / `request_geo_location` live-подтверждены; `chat`-кнопка сейчас ограничена платформой) |
 | `bot.send_message_to_chat_with_options(chat_id, body, options)` | Отправить с query-настройками, например `disable_link_preview` |
 | `bot.edit_message(mid, body)` | Редактировать сообщение |
 | `bot.delete_message(mid)` | Удалить сообщение |
@@ -102,8 +118,8 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.get_video(video_token)` | Получить metadata и URL воспроизведения видео |
 | `bot.answer_callback(body)` | Ответ на нажатие кнопки |
 | `bot.get_chat(chat_id)` | Информация о чате |
-| `bot.get_chat_by_link(chat_link)` | Информация о канале по публичной ссылке / username, например `https://max.ru/channel`, `channel` или `@channel`; доступность зависит от доступа MAX Bot API к этому каналу |
-| `bot.get_chats(…)` | Список групповых чатов |
+| `bot.get_chat_by_link(chat_link)` | Информация о канале по публичной ссылке / username, например `https://max.ru/channel`, `channel` или `@channel` (может вернуть `404 Chat not found by link`, если канал недоступен боту) |
+| `bot.get_chats(…)` | Deprecated: MAX больше не поддерживает `GET /chats`; сохраняйте `chat_id` из updates самостоятельно |
 | `bot.edit_chat(chat_id, body)` | Изменить название / описание чата |
 | `bot.leave_chat(chat_id)` | Выйти из чата |
 | `bot.get_members(…)` | Участники чата |
@@ -116,7 +132,7 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.remove_admin(chat_id, user_id)` | Снять права администратора |
 | `bot.pin_message(…)` | Закрепить сообщение |
 | `bot.unpin_message(…)` | Открепить |
-| `bot.send_sender_action(chat_id, action)` | Отправить типизированное действие бота |
+| `bot.send_sender_action(chat_id, action)` | Отправить типизированное действие бота (`typing_on` live-подтверждён как видимый в групповых чатах) |
 | `bot.get_updates_with_types(…, types)` | Long polling только для выбранных типов update |
 | `bot.get_updates_raw_with_types(…, types)` | Raw JSON long polling только для выбранных типов update |
 | `bot.subscribe(body)` | Подписаться на Webhook |
@@ -127,7 +143,7 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 | `bot.send_video_to_chat(...)` | Загрузить и отправить видео |
 | `bot.send_audio_to_chat(...)` | Загрузить и отправить аудио |
 | `bot.send_file_to_chat(...)` | Загрузить и отправить обычный файл |
-| `bot.set_my_commands(commands)` | Экспериментально: публичный MAX API сейчас отвечает `404` на `/me/commands` |
+| `bot.set_my_commands(commands)` | Экспериментально: публичный write endpoint не документирован; live API сейчас отвечает `404` на `/me/commands` |
 
 ## user_id и chat_id
 
@@ -139,16 +155,32 @@ MAX_BOT_TOKEN=ваш_токен cargo run --example echo_bot
 - Используйте `send_text_to_chat(chat_id, ...)` / `send_message_to_chat(chat_id, ...)`, когда у вас уже есть ID диалога или группы.
 - Используйте `send_text_to_user(user_id, ...)` / `send_message_to_user(user_id, ...)`, когда у вас есть только глобальный MAX `user_id` пользователя.
 
-## Поведение MAX, подтверждённое live-тестом
+## Замена deprecated `get_chats`
 
-На 20 мая 2026 года полный прогон `examples/live_api_test.rs` завершился с `89 PASS / 0 FAIL / 8 SKIP`. Пропущенные шаги — это явный выбор тестера или текущие ограничения платформы MAX:
+MAX перестал поддерживать `GET /chats` с июня 2026 года и объявил отключение в августе 2026. Endpoint-замены, который возвращает полный список чатов/каналов бота, нет. Сохраняйте `chat_id` из updates в собственной БД, удаляйте их на `bot_removed`, затем используйте `get_chat(chat_id)` и остальные методы по `chat_id`.
 
-- `Button::RequestContact` live-подтверждён: приходит `vcf_info`, валидный `hash` и `max_info`; `ContactPayload::validate_hash(token)` проверяет VCF hash. Некоторые клиенты могут не заполнять старое shortcut-поле `vcf_phone`, поэтому используйте `phones_from_vcf()` как fallback.
-- `Button::RequestGeoLocation` live-подтверждён: приходит структурированное `Attachment::Location` с `latitude` и `longitude`; в клиенте та же отправленная позиция может отображаться как карточка Яндекс Карт.
-- `bot.send_sender_action(chat_id, SenderAction::TypingOn)` live-подтверждён: индикатор набора текста виден в групповом чате.
-- `bot.get_chat_by_link(...)` реализован по официальному API и принимает full `max.ru` URL, имя без префикса и `@name`, но MAX может вернуть `404 Chat not found by link` для публичных каналов, которые не резолвятся Bot API для текущего бота.
-- `Button::chat(...)` смоделирован по публичной схеме MAX, но текущие live-запросы `POST /messages` с документированным JSON `chat`-кнопки возвращают `400 Can't deserialize body`. Live harness помечает эту opt-in проверку как ограничение платформы, печатает исходящий JSON и умеет ловить raw `message_chat_created`, если у вас уже есть рабочая chat-кнопка.
-- `bot.set_my_commands` оставлен как экспериментальный helper, но в публичной REST-документации MAX нет write-эндпоинта для команд бота, а live-запросы `POST /me/commands` возвращают `404 Path /me/commands is not recognized`.
+```rust
+use maxoxide::{Context, Dispatcher};
+use maxoxide::types::Update;
+
+# fn configure(dp: &mut Dispatcher) {
+dp.on_bot_added(|ctx: Context| async move {
+    if let Update::BotAdded { chat_id, .. } = &ctx.update {
+        // Сохранить chat_id в своей БД.
+    }
+    Ok(())
+});
+
+dp.on_bot_removed(|ctx: Context| async move {
+    if let Update::BotRemoved { chat_id, .. } = &ctx.update {
+        // Удалить chat_id из своей БД.
+    }
+    Ok(())
+});
+# }
+```
+
+Для общих handlers можно использовать `Update::chat_id()`: он возвращает ID чата, если update его содержит.
 
 ## Фильтры диспетчера
 
@@ -208,6 +240,8 @@ let keyboard = KeyboardPayload {
 let body = NewMessageBody::empty().with_keyboard(keyboard);
 bot.send_message_to_chat(chat_id, body).await?;
 ```
+
+Кнопки запроса контакта live-подтверждены: приходят `vcf_info`, `hash` и `max_info` (`ContactPayload::validate_hash(token)` проверяет VCF hash; если `vcf_phone` пустой, используйте `phones_from_vcf()`). Кнопки запроса геопозиции live-подтверждены: приходит структурированный `Attachment::Location`. `Button::chat(...)` оставлен для документированной схемы MAX, но текущий live `POST /messages` отклоняет документированный JSON `chat`-кнопки с `400 Can't deserialize body`.
 
 ## Загрузка файлов
 
@@ -280,13 +314,15 @@ maxoxide/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          — публичный API и ре-экспорты
-│   ├── bot.rs          — Bot + все HTTP-методы
+│   ├── bot.rs          — Bot, HTTP-методы и TLS helpers
 │   ├── uploader.rs     — загрузка файлов
 │   ├── dispatcher.rs   — Dispatcher, Filter, Context
 │   ├── errors.rs       — MaxError
 │   ├── webhook.rs      — axum webhook-сервер (feature = "webhook")
 │   ├── tests.rs        — юнит-тесты
-│   └── types.rs        — все типы (User, Chat, Message, Update, …)
+│   ├── types.rs        — все типы (User, Chat, Message, Update, …)
+│   └── certs/
+│       └── russian_trusted_root_ca.pem
 └── examples/
     ├── echo_bot.rs
     ├── dispatcher_filters_bot.rs
