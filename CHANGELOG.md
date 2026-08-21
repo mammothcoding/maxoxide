@@ -2,13 +2,99 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] - 2026-08-21
+
+### EN
+
+#### Release summary
+
+This major release turns `maxoxide` into a production-oriented MAX SDK with validated client configuration, structured failures, retries and rate limits, bounded-memory uploads, a composable dispatcher, framework-neutral webhooks, and current MAX wire contracts. Obsolete compatibility APIs are intentionally removed; see `MIGRATION.md` when upgrading from 2.x.
+
+#### Breaking changes
+
+- `Bot::new`, `Bot::from_env`, and `Bot::with_client` now return `Result<Bot>` instead of constructing or panicking unconditionally.
+- `MaxError::Api { code, message }` was replaced by `MaxError::Api(ApiError)`. `ApiError` separates HTTP `status` from the optional string MAX `code` and also exposes a bounded `raw_response` and `retry_after`.
+- `Bot::get_me()` now returns `BotInfo`. `BotCommand::description` is optional, and `Bot::set_my_commands` now uses the documented `PATCH /me/commands` route and returns `BotCommands`.
+- Removed `Bot::edit_my_info` and `EditMyInfoBody`; the current public API documents command replacement rather than generic bot-profile editing.
+- Removed `Bot::get_chats` and `ChatList` because MAX no longer supports `GET /chats`. Applications must persist `chat_id` values received from updates.
+- Removed `ButtonIntent` and all button `intent` fields because current official clients mark them unsupported.
+- `Recipient` adds optional `post_id`, and `Message::constructor` is now `Option<User>` instead of arbitrary JSON. Existing struct literals and direct field handling may need updates.
+- `Dispatcher::start_polling`, `dispatch`, and `dispatch_raw` now return `Result<()>`; `on_error` receives `&MaxError`.
+- Removed the old `webhook` feature and `WebhookServer`. Applications must select `webhook-axum` and/or `webhook-actix` and host the shared `WebhookService` themselves.
+- The minimum supported Rust version is explicitly Rust 1.85.
+
+#### Added
+
+- Added `BotBuilder` with validated base URLs, request/connect/upload timeouts, custom `reqwest::Client`, HTTP/HTTPS proxy support, optional SOCKS proxy support, secure TLS roots, and `RetryPolicy`. `BotBuilder::no_proxy()` can disable automatic system proxies for the MAX client, while `BotBuilder::proxy` accepts authenticated and selectively bypassed reqwest proxies.
+- Added global and recipient/resource-specific MAX rate limiting, bounded limiter eviction, retry backoff, and `Retry-After` handling.
+- Added `Bot::execute` as a guarded escape hatch for relative Bot API endpoints not yet represented by typed methods.
+- Added current MAX models and wire values including `Recipient.post_id`, typed message constructors, `MessageConstructionRequest`, `MessageConstructed`, `bot_stopped.payload`, and `ChatAdminPermission::ViewStats`.
+- Added typed outgoing sticker, contact, location, and share attachments together with request validation for messages, keyboards, comments, and attachment payloads.
+- Added five typed experimental comment methods. MAX still marks the comments API temporarily unavailable, so applications must handle availability failures.
+- Added HTML send helpers and Unicode-safe long-message helpers that split text at MAX's 4000-character limit.
+- Added streaming multipart uploads and resumable `Content-Range` uploads with configurable chunk size, per-chunk retry, timeout, progress callbacks, and cancellation.
+- Added Dispatcher middleware, typed application state, exact command matching and arguments, construction-event filters, bounded concurrency, programmatic shutdown, Ctrl+C handling, and drain timeouts.
+- Added framework-neutral webhook processing with constant-time secret verification, body/in-flight limits, dispatch timeout and backpressure, plus optional Axum and Actix adapters.
+- Added strict Mini App init-data and contact validation, plus an experimental feature-gated Digital ID partner client with credentials isolated from the Bot API client. The integration requires validation against the private onboarding contract before production use.
+- Added 25 runnable examples with bilingual usage and prerequisite notes, paired English/Russian guides and recipes, `MIGRATION.md`, `API_SUPPORT.md`, and `SECURITY.md`.
+
+#### Changed
+
+- All Bot API requests now share one execution path for authorization, secure endpoint resolution, rate limiting, retries, structured errors, and bounded diagnostics without logging response bodies or signed upload URLs.
+- File-based upload helpers no longer buffer complete files in memory; `upload_bytes` remains memory-backed by design.
+- Unknown update, attachment, markup, and extensible string-enum values are preserved where practical for forward compatibility.
+- Command filters now match the exact first token instead of arbitrary prefixes, and `Context::command_arguments` exposes the remaining text.
+- The crate version was bumped to `3.0.0`.
+
+### RU
+
+#### Кратко о релизе
+
+Этот major-релиз превращает `maxoxide` в production-oriented SDK для MAX: добавляет проверяемую конфигурацию клиента, structured errors, retry и rate limits, загрузки с ограниченным потреблением памяти, составной Dispatcher, framework-neutral Webhook и актуальные wire-контракты MAX. Устаревшие compatibility APIs намеренно удалены; при переходе с 2.x используйте `MIGRATION.md`.
+
+#### Ломающие изменения
+
+- `Bot::new`, `Bot::from_env` и `Bot::with_client` теперь возвращают `Result<Bot>` вместо безусловного создания или panic.
+- `MaxError::Api { code, message }` заменён на `MaxError::Api(ApiError)`. В `ApiError` HTTP `status` отделён от optional строкового MAX `code`, также доступны ограниченный `raw_response` и `retry_after`.
+- `Bot::get_me()` теперь возвращает `BotInfo`. Поле `BotCommand::description` стало optional, а `Bot::set_my_commands` использует документированный route `PATCH /me/commands` и возвращает `BotCommands`.
+- Удалены `Bot::edit_my_info` и `EditMyInfoBody`: актуальный публичный API документирует замену команд, а не общий edit профиля бота.
+- Удалены `Bot::get_chats` и `ChatList`, потому что MAX больше не поддерживает `GET /chats`. Приложение должно сохранять `chat_id` из полученных updates.
+- Удалены `ButtonIntent` и все поля `intent`, которые актуальные официальные клиенты помечают как неподдерживаемые.
+- В `Recipient` добавлен optional `post_id`, а `Message::constructor` теперь имеет тип `Option<User>` вместо произвольного JSON. Struct literals и прямую обработку полей может потребоваться обновить.
+- `Dispatcher::start_polling`, `dispatch` и `dispatch_raw` теперь возвращают `Result<()>`; `on_error` получает `&MaxError`.
+- Удалены старые feature `webhook` и `WebhookServer`. Приложение должно выбрать `webhook-axum` и/или `webhook-actix` и самостоятельно разместить общий `WebhookService`.
+- Минимальная поддерживаемая версия Rust явно установлена на Rust 1.85.
+
+#### Добавлено
+
+- Добавлен `BotBuilder` с проверкой base URL, request/connect/upload timeouts, custom `reqwest::Client`, HTTP/HTTPS proxy, optional SOCKS proxy, безопасными TLS roots и `RetryPolicy`. `BotBuilder::no_proxy()` позволяет отключить автоматические системные proxy для MAX client, а `BotBuilder::proxy` принимает authenticated reqwest proxy и proxy с selective exclusions.
+- Добавлены глобальный и recipient/resource-specific MAX rate limiting, ограниченное вытеснение limiter-ов, retry backoff и поддержка `Retry-After`.
+- Добавлен `Bot::execute` как защищённый escape hatch для относительных Bot API endpoints, ещё не представленных typed methods.
+- Добавлены актуальные модели и wire-значения MAX: `Recipient.post_id`, typed constructor сообщения, `MessageConstructionRequest`, `MessageConstructed`, `bot_stopped.payload` и `ChatAdminPermission::ViewStats`.
+- Добавлены исходящие sticker, contact, location и share attachments, а также validation сообщений, клавиатур, комментариев и attachment payloads.
+- Добавлены пять typed experimental methods комментариев. MAX всё ещё помечает comments API временно недоступным, поэтому приложение должно обрабатывать ошибки доступности.
+- Добавлены HTML helpers и Unicode-safe helpers длинных сообщений с разделением по лимиту MAX в 4000 символов.
+- Добавлены streaming multipart и resumable `Content-Range` uploads с настройкой chunk size, retry текущего chunk, timeout, progress callbacks и cancellation.
+- Dispatcher получил middleware, typed state приложения, точное сопоставление команд и arguments, filters construction events, bounded concurrency, programmatic shutdown, обработку Ctrl+C и drain timeout.
+- Добавлена framework-neutral обработка webhook с constant-time проверкой secret, лимитами body/in-flight, dispatch timeout и backpressure, а также optional Axum и Actix adapters.
+- Добавлены строгая проверка Mini App init data/contact и experimental feature-gated partner client Digital ID с credentials, изолированными от Bot API client. Перед production интеграцию необходимо проверить по private onboarding contract.
+- Добавлены 25 запускаемых примеров с двуязычными пояснениями по применению и prerequisites, парные EN/RU guides и recipes, `MIGRATION.md`, `API_SUPPORT.md` и `SECURITY.md`.
+
+#### Изменено
+
+- Все Bot API requests теперь проходят через единый execution path с авторизацией, безопасным разрешением endpoint, rate limiting, retries, structured errors и bounded diagnostics без логирования response body или signed upload URL.
+- File-based upload helpers больше не буферизуют файлы целиком в памяти; `upload_bytes` по определению остаётся memory-backed.
+- Неизвестные значения update, attachments, markup и расширяемых строковых enum по возможности сохраняются для forward compatibility.
+- Command filters теперь сравнивают точный первый token вместо произвольного prefix, а `Context::command_arguments` возвращает оставшийся текст.
+- Версия крейта повышена до `3.0.0`.
+
 ## [2.3.0] - 2026-07-13
 
 ### EN
 
 #### Release summary
 
-This compatible release adds a custom-client TLS helper for the current MAX API certificate chain and removes maxoxide's own live-test dependency on the deprecated `GET /chats` endpoint.
+This compatible release adds a custom-client TLS helper for the current MAX API certificate chain and prepares applications for removal of the deprecated `GET /chats` endpoint.
 
 #### Added
 
@@ -18,7 +104,7 @@ This compatible release adds a custom-client TLS helper for the current MAX API 
 #### Changed
 
 - Bumped the crate version to `2.3.0`.
-- `examples/live_api_test.rs` no longer calls `bot.get_chats` at startup. The optional group phase now uses the `/group_live` update or manual `chat_id` entry.
+- Updated `live_api_test` to obtain group chat IDs from updates or explicit input instead of the deprecated `GET /chats` method.
 - README and README.ru now document that `Bot::new()` and `Bot::from_env()` configure Russian TLS automatically, while `Bot::with_client(...)` custom clients should call `.russian_tls()` during `reqwest::ClientBuilder` setup.
 
 #### Deprecated
@@ -29,7 +115,7 @@ This compatible release adds a custom-client TLS helper for the current MAX API 
 
 #### Кратко о релизе
 
-Совместимый релиз добавляет TLS-helper для custom clients под текущую цепочку сертификатов MAX API и убирает собственную зависимость live-теста maxoxide от deprecated endpoint `GET /chats`.
+Совместимый релиз добавляет TLS-helper для custom clients под текущую цепочку сертификатов MAX API и подготавливает приложения к удалению deprecated endpoint `GET /chats`.
 
 #### Добавлено
 
@@ -39,7 +125,7 @@ This compatible release adds a custom-client TLS helper for the current MAX API 
 #### Изменено
 
 - Версия крейта повышена до `2.3.0`.
-- `examples/live_api_test.rs` больше не вызывает `bot.get_chats` на старте. Опциональный групповой этап использует update от `/group_live` или ручной ввод `chat_id`.
+- `live_api_test` теперь получает ID группового чата из updates или явного ввода вместо deprecated метода `GET /chats`.
 - README и README.ru теперь документируют, что `Bot::new()` и `Bot::from_env()` настраивают Russian TLS автоматически, а custom clients для `Bot::with_client(...)` должны вызывать `.russian_tls()` на этапе настройки `reqwest::ClientBuilder`.
 
 #### Deprecated
@@ -59,15 +145,13 @@ This compatible release follows the current official MAX SDKs and schema by swit
 - Added `Bot::get_chat_by_link(chat_link)` for `GET /chats/{chatLink}`. The official API documents this endpoint for channels by public link / username, for example `@channel`; live availability depends on MAX Bot API access to that channel.
 - Added `Chat.participants` and `Chat.messages_count` fields from the current `Chat` schema.
 - Added typed `ChatAdminPermission::Edit` and `ChatAdminPermission::Delete` variants for the current admin permission enum.
-- Added optional `bot.get_chat_by_link` coverage to `examples/live_api_test.rs`.
 - Added automatic `Russian Trusted Root CA` handling for the default clients created by `Bot::new()` and `Bot::from_env()`: maxoxide tries to download the fresh PEM from the official `gu-st.ru` URL and falls back to an embedded copy while keeping TLS verification enabled.
 
 #### Changed
 
 - Switched the hardcoded API host from deprecated `https://platform-api.max.ru` to current `https://platform-api2.max.ru`.
-- Updated `examples/live_api_test.rs` to use the default bot client so it exercises automatic TLS trust setup and no longer asks for a custom HTTP timeout.
 - `Bot::get_chat_by_link` now accepts full `max.ru` URLs, plain channel names, and `@channel` names; full URLs are safely encoded as a single path segment and channel-name fallbacks are tried on `404`.
-- `examples/live_api_test.rs` now treats `bot.get_chat_by_link` `404 Chat not found by link` as an optional precondition skip because public links can be unavailable to the Bot API for a given bot/channel.
+- Updated `live_api_test` to use the default client and include an optional `get_chat_by_link` scenario.
 
 ### RU
 
@@ -80,15 +164,13 @@ This compatible release follows the current official MAX SDKs and schema by swit
 - Добавлен `Bot::get_chat_by_link(chat_link)` для `GET /chats/{chatLink}`. Официальный API документирует этот endpoint для каналов по публичной ссылке / username, например `@channel`; live-доступность зависит от доступа MAX Bot API к этому каналу.
 - Добавлены поля `Chat.participants` и `Chat.messages_count` из актуальной схемы `Chat`.
 - Добавлены typed variants `ChatAdminPermission::Edit` и `ChatAdminPermission::Delete` для актуального enum прав администратора.
-- Добавлена опциональная проверка `bot.get_chat_by_link` в `examples/live_api_test.rs`.
 - Добавлена автоматическая поддержка `Russian Trusted Root CA` для default clients, созданных через `Bot::new()` и `Bot::from_env()`: maxoxide пытается скачать свежий PEM с официального URL `gu-st.ru` и fallback-ом использует встроенную копию, не отключая TLS verification.
 
 #### Изменено
 
 - Hardcoded API host переключён с deprecated `https://platform-api.max.ru` на актуальный `https://platform-api2.max.ru`.
-- `examples/live_api_test.rs` переведён на default bot client, чтобы проверять автоматическую настройку TLS trust, и больше не спрашивает custom HTTP timeout.
 - `Bot::get_chat_by_link` теперь принимает full `max.ru` URL, имя канала без префикса и `@channel`; full URL безопасно кодируется как один path segment, а варианты имени канала пробуются при `404`.
-- `examples/live_api_test.rs` теперь помечает `bot.get_chat_by_link` `404 Chat not found by link` как пропущенное optional-предусловие, потому что публичная ссылка может быть недоступна Bot API для конкретного бота/канала.
+- `live_api_test` переведён на default client и получил optional-сценарий `get_chat_by_link`.
 
 ## [2.1.0] - 2026-05-20
 
@@ -110,24 +192,15 @@ This compatible release tracks the May 2026 MAX Bot API updates without changing
 
 #### Changed
 
-- The live API harness now probes filtered polling, message markup, contact hash/max_info, optional dialog events, and opt-in chat-button chat creation with explicit cleanup choice.
-- The live API harness now supports both update transports at startup: `long_polling` and `webhook`.
-- In `long_polling` mode, the live API harness checks active webhook subscriptions, warns that they disable long polling, can temporarily unsubscribe them, and restores them at the end using the webhook secret entered during startup.
-- In `webhook` mode, the live API harness starts a minimal local webhook receiver so manual waits can consume incoming webhook POSTs without enabling the optional crate `webhook` feature.
-- The live API harness now treats MAX `ChatButton` send-time deserialization failures as an opt-in platform limitation, prints the outgoing JSON, and can capture raw `message_chat_created` updates for investigation.
-- Live testing confirmed that the group-chat typing indicator is now visible for `typing_on`.
-- The live group phase now exercises `remove_member_with_options` and asks before passing `block=true`.
-- The live group phase now treats `add_admins` attempts for non-participant user IDs as skipped precondition failures instead of SDK/API failures.
+- Expanded `live_api_test` with long-polling/webhook modes and optional scenarios for markup, contacts, dialog events, chat buttons, and group administration.
 - The crate version was bumped to `2.1.0`.
 
-#### Live API observations
+#### Known MAX platform behavior
 
-- Full long-polling live run completed with `89 PASS / 0 FAIL / 8 SKIP`.
-- `request_contact` is live-confirmed to deliver `vcf_info`, a valid `hash`, and `max_info`; `vcf_phone` may still be empty, so `phones_from_vcf()` is the reliable fallback.
-- `request_geo_location` is live-confirmed to deliver structured `Attachment::Location` coordinates.
-- Webhook subscribe/unsubscribe and pre-polling restore were live-confirmed.
-- `ChatButton` remains a MAX platform limitation in current live testing: documented `chat` button JSON is rejected by `POST /messages` with `400 Can't deserialize body`.
-- `set_my_commands` remains a MAX platform limitation: public live `POST /me/commands` requests return `404`.
+- `request_contact` can deliver `vcf_info`, a valid `hash`, and `max_info`; `vcf_phone` may still be empty, so `phones_from_vcf()` is the reliable fallback.
+- `request_geo_location` delivers structured `Attachment::Location` coordinates.
+- Documented `ChatButton` JSON is rejected by `POST /messages` with `400 Can't deserialize body`.
+- `set_my_commands` remains a MAX platform limitation: public `POST /me/commands` requests return `404`.
 
 ### RU
 
@@ -147,24 +220,15 @@ This compatible release tracks the May 2026 MAX Bot API updates without changing
 
 #### Изменено
 
-- Live API harness теперь проверяет filtered polling, message markup, contact hash/max_info, optional dialog events и opt-in создание чата через chat-кнопку с явным выбором cleanup.
-- Live API harness теперь поддерживает оба транспорта updates на старте: `long_polling` и `webhook`.
-- В режиме `long_polling` live API harness проверяет активные webhook subscriptions, предупреждает, что они отключают long polling, может временно отписать их и восстанавливает их в конце с webhook secret, введённым при старте.
-- В режиме `webhook` live API harness запускает минимальный локальный webhook receiver, чтобы ручные ожидания читали входящие webhook POST без включения optional crate feature `webhook`.
-- Live API harness теперь помечает send-time ошибку десериализации MAX `ChatButton` как opt-in ограничение платформы, печатает исходящий JSON и умеет ловить raw `message_chat_created` для расследования.
-- Live-тест подтвердил, что индикатор набора текста в групповом чате теперь виден для `typing_on`.
-- Групповой этап live harness проверяет `remove_member_with_options` и спрашивает перед `block=true`.
-- Групповой этап live harness теперь помечает `add_admins` для user_id, который не является участником чата, как пропущенное предусловие, а не как ошибку SDK/API.
+- `live_api_test` расширен режимами long polling/webhook и optional-сценариями для markup, contacts, dialog events, chat buttons и администрирования групп.
 - Версия крейта повышена до `2.1.0`.
 
-#### Наблюдения live API
+#### Известное поведение платформы MAX
 
-- Полный live-прогон через long polling завершился с `89 PASS / 0 FAIL / 8 SKIP`.
-- `request_contact` live-подтверждён: приходит `vcf_info`, валидный `hash` и `max_info`; `vcf_phone` всё ещё может быть пустым, поэтому `phones_from_vcf()` — надёжный fallback.
-- `request_geo_location` live-подтверждён: приходят структурированные координаты `Attachment::Location`.
-- Webhook subscribe/unsubscribe и восстановление перед long polling live-подтверждены.
-- `ChatButton` остаётся ограничением платформы MAX в текущем live-тестировании: документированный JSON `chat`-кнопки отклоняется `POST /messages` с `400 Can't deserialize body`.
-- `set_my_commands` остаётся ограничением платформы MAX: публичные live-запросы `POST /me/commands` возвращают `404`.
+- `request_contact` может передавать `vcf_info`, валидный `hash` и `max_info`; `vcf_phone` всё ещё может быть пустым, поэтому `phones_from_vcf()` — надёжный fallback.
+- `request_geo_location` передаёт структурированные координаты `Attachment::Location`.
+- Документированный JSON `ChatButton` отклоняется `POST /messages` с `400 Can't deserialize body`.
+- `set_my_commands` остаётся ограничением платформы MAX: публичные запросы `POST /me/commands` возвращают `404`.
 
 ## [2.0.0] - 2026-04-27
 
@@ -207,7 +271,7 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
   - `SenderAction`
 - Added more complete MAX models for users, chats, members, admins, video metadata, photo payloads, and partial success results.
 - Added `Button::OpenApp` using the official Go SDK fields `web_app`, `payload`, and `contact_id`.
-- Added `Button::Clipboard`, which is present in the official Go SDK and can be validated through the live harness.
+- Added `Button::Clipboard`, which is present in the official Go SDK.
 - Added builders for `NewMessageBody`, `NewAttachment`, and `UploadedToken`.
 - Added `SendMessageOptions` with `disable_link_preview`.
 - Added message, video, member, and admin endpoints:
@@ -239,7 +303,6 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
 - Long polling now receives raw update JSON first, then dispatches through raw and typed handlers.
 - Webhook handling now dispatches raw JSON through the same dispatcher path as long polling.
 - Upload helpers now accept attachment tokens from either the upload endpoint response or multipart upload response, preserve the MAX `photos` token map for image send helpers, and retry briefly while MAX reports an uploaded attachment as not processed yet.
-- The live harness now treats empty contact phone payloads as a MAX platform gap, recognizes structured request-location attachments, logs non-matching updates during manual waits, and checks the bot's granular `add_admins` permission before probing admin-right changes.
 - README examples now use builders and the new media helpers.
 - The crate version was bumped to `2.0.0`.
 
@@ -282,7 +345,7 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
   - `SenderAction`
 - Расширены модели MAX для пользователей, чатов, участников, администраторов, video metadata, photo payloads и частично успешных результатов.
 - Добавлен `Button::OpenApp` с полями официального Go SDK: `web_app`, `payload`, `contact_id`.
-- Добавлен `Button::Clipboard`, который есть в официальном Go SDK и проверяется через live harness.
+- Добавлен `Button::Clipboard`, который есть в официальном Go SDK.
 - Добавлены builders для `NewMessageBody`, `NewAttachment` и `UploadedToken`.
 - Добавлен `SendMessageOptions` с `disable_link_preview`.
 - Добавлены методы для сообщений, видео, участников и администраторов:
@@ -314,7 +377,6 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
 - Long polling сначала получает raw JSON update, затем dispatch проходит через raw и typed handlers.
 - Webhook теперь dispatchит raw JSON тем же путём, что и long polling.
 - Upload helpers принимают attachment token как из ответа upload endpoint, так и из multipart upload response, сохраняют MAX `photos` token map для image send helpers и коротко ретраят отправку, пока MAX сообщает, что вложение ещё не обработано.
-- Live harness теперь помечает пустой телефон в contact payload как platform gap MAX, распознаёт структурированные request-location attachments, логирует неподходящие updates во время ручного ожидания и проверяет granular-право бота `add_admins` перед проверкой изменения admin-прав.
 - Примеры README переведены на builders и новые media helpers.
 - Версия крейта повышена до `2.0.0`.
 
@@ -324,7 +386,7 @@ This release aligns `maxoxide` with the current public MAX REST API, adds conven
 
 #### Release summary
 
-This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactive live API test harness for MAX, fixes several real-API mismatches, and makes message delivery APIs explicit about whether they target a `chat_id` or a `user_id`.
+This release promotes `maxoxide` from `0.1.0` to `1.0.0`, fixes several API mismatches, and makes message delivery APIs explicit about whether they target a `chat_id` or a `user_id`.
 
 #### Breaking changes
 
@@ -347,16 +409,7 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 
 #### Added
 
-- Added `examples/live_api_test.rs`, an interactive real-API harness with:
-  - English and Russian language selection
-  - runtime input for token, bot URL, webhook settings, file path, delays, and timeouts
-  - manual tester-driven steps in the MAX client
-  - optional group-chat phase
-  - `PASS / FAIL / SKIP` summary
-  - non-blocking manual waits with `continue / skip / fail`
-- Added a `/get_my_id` live-test flow and sender `user_id` logging
-- Added live coverage for both `*_to_chat` and `*_to_user` methods, including attachment sending via `user_id`
-- Added tests that explicitly verify the difference between `chat_id` and `user_id`
+- Added `live_api_test`, an interactive advanced example for exercising real Bot API behavior with a controlled test bot and chats.
 
 #### Changed
 
@@ -373,20 +426,20 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 - Fixed `edit_message` to return `SimpleResult` instead of incorrectly deserializing a `Message`
 - Switched HTTP response parsing to `bytes + String::from_utf8_lossy` to avoid crashes on invalid UTF-8
 - Added lossy attachment deserialization so malformed or unknown attachments do not break entire update/message parsing
-- Updated action handling and live testing to use the real MAX action value `typing_on`
+- Updated action handling to use the MAX action value `typing_on`
 
-#### MAX platform gaps documented by live testing
+#### Known MAX platform behavior
 
-- `request_contact` is documented by MAX, but live tests received a contact attachment with empty `contact_id` and empty `vcf_phone`
-- `request_geo_location` is documented by MAX, and the mobile client shows a sent location card, but the bot did not receive a matching update in live polling tests
-- `typing_on` returns a successful API response, but the client-side typing indicator was not reliably visible in live testing
-- `set_my_commands` remains experimental: live `POST /me/commands` requests returned `404`, and the public MAX REST docs do not currently expose a documented write endpoint for command menu updates
+- `request_contact` may deliver a contact attachment with empty `contact_id` and `vcf_phone`.
+- `request_geo_location` may display a location card in the mobile client without delivering a matching update to the bot.
+- `typing_on` may return a successful API response without a visible client-side typing indicator.
+- `set_my_commands` remains experimental: `POST /me/commands` returns `404`, and the public MAX REST docs do not expose a documented write endpoint for command menu updates.
 
 ### RU
 
 #### Кратко о релизе
 
-Этот релиз переводит `maxoxide` с ветки `0.1.0` на `1.0.0`, добавляет полноценный интерактивный live-тест на реальном API MAX, исправляет несколько несовпадений с реальным поведением платформы и делает API отправки сообщений явным по типу получателя: `chat_id` или `user_id`.
+Этот релиз переводит `maxoxide` с ветки `0.1.0` на `1.0.0`, исправляет несколько несовпадений с API и делает отправку сообщений явной по типу получателя: `chat_id` или `user_id`.
 
 #### Ломающие изменения
 
@@ -409,16 +462,7 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 
 #### Добавлено
 
-- Добавлен `examples/live_api_test.rs` — интерактивный harness для проверки реального API, который включает:
-  - выбор языка English / Russian
-  - ввод токена, URL бота, webhook-настроек, пути к файлу, задержек и таймаутов во время старта
-  - ручные шаги тестера в клиенте MAX
-  - необязательный этап группового чата
-  - итоговую сводку `PASS / FAIL / SKIP`
-  - ручное ожидание без `Ctrl+C` через `continue / skip / fail`
-- Добавлен live-сценарий `/get_my_id` и вывод `sender.user_id`
-- Добавлено live-покрытие новых методов `*_to_chat` и `*_to_user`, включая отправку вложения по `user_id`
-- Добавлены тесты, которые явно проверяют различие между `chat_id` и `user_id`
+- Добавлен `live_api_test`, интерактивный расширенный пример для проверки поведения реального Bot API с контролируемыми тестовым ботом и чатами.
 
 #### Изменено
 
@@ -435,11 +479,11 @@ This release promotes `maxoxide` from `0.1.0` to `1.0.0`, adds a real interactiv
 - Исправлен `edit_message`: теперь метод возвращает `SimpleResult`, а не пытается неверно десериализовать `Message`
 - Разбор HTTP-ответов переведён на `bytes + String::from_utf8_lossy`, чтобы не падать на невалидном UTF-8
 - Добавлена lossy-десериализация вложений: неизвестный или кривой attachment больше не валит весь update или message
-- Для действий бота и live-теста закреплено реальное значение MAX `typing_on`
+- Для действий бота закреплено значение MAX `typing_on`
 
-#### Ограничения платформы MAX, выявленные live-тестами
+#### Известное поведение платформы MAX
 
-- `request_contact` задокументирован в MAX, но в live-тестах contact приходил с пустыми `contact_id` и `vcf_phone`
-- `request_geo_location` задокументирован в MAX, мобильный клиент показывает отправленную карточку геопозиции, но бот не получил соответствующий update в live polling
-- `typing_on` возвращает успешный API-ответ, но видимый индикатор набора текста в клиенте live-тестами не подтверждён
-- `set_my_commands` остаётся experimental helper: live-запросы `POST /me/commands` возвращают `404`, а публичный REST MAX сейчас не показывает документированного write-эндпоинта для меню команд
+- `request_contact` может передать contact attachment с пустыми `contact_id` и `vcf_phone`.
+- `request_geo_location` может показать карточку геопозиции в мобильном клиенте без доставки соответствующего update боту.
+- `typing_on` может вернуть успешный API-ответ без видимого индикатора набора текста в клиенте.
+- `set_my_commands` остаётся experimental helper: `POST /me/commands` возвращает `404`, а публичный REST MAX не показывает документированного write-endpoint для меню команд.

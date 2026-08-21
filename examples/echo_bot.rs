@@ -1,16 +1,31 @@
-//! Echo bot — mirrors every received message back to the sender.
+//! # English
 //!
-//! Run:
-//!   MAX_BOT_TOKEN=your_token cargo run --example echo_bot
+//! A beginner-friendly echo bot with one command and one fallback handler.
+//! `/start` sends a welcome message; every other message is copied back to the
+//! same chat. Use this as a starting point for a simple support bot, a token and
+//! polling check, or to learn how command handlers take priority over a general
+//! message handler. The process runs until Ctrl+C.
+//!
+//! Run: `MAX_BOT_TOKEN=... cargo run --example echo_bot`.
+//!
+//! # Русский
+//!
+//! Понятный эхо-бот с одной командой и общим обработчиком сообщений. На `/start`
+//! бот отправляет приветствие, а любое другое сообщение копирует обратно в тот же
+//! чат. Используйте пример как основу простого support-бота, для проверки токена и
+//! polling или чтобы понять приоритет command handler над общим message handler.
+//! Процесс работает до нажатия Ctrl+C.
+//!
+//! Запуск: `MAX_BOT_TOKEN=... cargo run --example echo_bot`.
 
 use maxoxide::types::Update;
 use maxoxide::{Bot, Context, Dispatcher};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> maxoxide::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let bot = Bot::from_env();
+    let bot = Bot::from_env().expect("MAX_BOT_TOKEN must contain a valid bot token");
     let mut dp = Dispatcher::new(bot);
 
     // /start command
@@ -35,5 +50,5 @@ async fn main() {
         Ok(())
     });
 
-    dp.start_polling().await;
+    dp.start_polling().await
 }

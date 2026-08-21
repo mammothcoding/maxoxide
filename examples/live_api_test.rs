@@ -1,8 +1,40 @@
-//! Interactive live API test harness for a real Max bot.
+//! # English
 //!
-//! Run:
-//!   cargo run --example live_api_test
+//! An interactive advanced integration example for a real MAX bot. Use it to explore
+//! platform behavior that cannot be demonstrated offline: polling or webhook delivery,
+//! messages, buttons, callbacks, uploads, commands, subscriptions, and optional chat
+//! administration. Run it only with a dedicated test bot, controlled chats, and
+//! disposable test content because it creates messages and can temporarily change
+//! commands or webhook subscriptions.
+//!
+//! The example asks before optional or destructive steps and restores captured
+//! command/webhook state where possible. `MAX_BOT_TOKEN` and `MAX_WEBHOOK_SECRET`
+//! take precedence; otherwise masked prompts are shown. Comments are reported as
+//! unavailable while MAX disables that API. The experimental Digital ID partner
+//! integration is outside this example's scope.
+//! Full setup and safety guidance: `docs/en/live-api-test.md`.
+//!
+//! Run: `cargo run --example live_api_test`.
+//!
+//! # Русский
+//!
+//! Интерактивный расширенный пример интеграции с реальным ботом MAX. Используйте его,
+//! чтобы исследовать поведение платформы, которое нельзя показать без обращения к API:
+//! long polling или webhook, сообщения, кнопки, callbacks, uploads, команды, подписки
+//! и необязательное администрирование чатов. Запускайте только с отдельным тестовым
+//! ботом, контролируемыми чатами и временными данными: пример создаёт сообщения и может
+//! временно менять команды или webhook-подписки.
+//!
+//! Перед необязательными и необратимыми шагами пример запрашивает подтверждение, а
+//! сохранённые команды и webhook-подписки по возможности восстанавливаются.
+//! `MAX_BOT_TOKEN` и `MAX_WEBHOOK_SECRET` имеют приоритет; иначе секреты запрашиваются
+//! с маскированным вводом. Комментарии отмечаются недоступными, пока MAX отключает API.
+//! Экспериментальная партнёрская интеграция Digital ID не входит в сценарии примера.
+//! Полная инструкция по настройке и безопасности: `docs/ru/live-api-test.md`.
+//!
+//! Запуск: `cargo run --example live_api_test`.
 
+use inquire::{Password, PasswordDisplayMode};
 use maxoxide::types::{
     AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatAdmin, ChatAdminPermission,
     ChatType, EditChatBody, KeyboardPayload, MarkupElement, Message, MessageFormat, NewAttachment,
@@ -119,7 +151,7 @@ async fn main() -> AnyResult<()> {
 
     let lang = Language::prompt()?;
     let config = Config::prompt(lang)?;
-    let bot = Bot::new(config.token.clone());
+    let bot = Bot::new(config.token.clone())?;
     let webhook_updates = if config.transport == UpdateTransport::Webhook {
         Some(start_webhook_receiver(&config).await?)
     } else {
@@ -159,8 +191,7 @@ async fn main() -> AnyResult<()> {
     {
         Some(me) => me,
         None => {
-            report.print_summary(lang);
-            return Ok(());
+            return report.finish(lang);
         }
     };
 
@@ -175,6 +206,8 @@ async fn main() -> AnyResult<()> {
         ),
     }
 
+    run_comments_phase(&mut report, lang);
+
     if let Some(channel_link) = config.channel_link.clone() {
         run_get_chat_by_link_probe(&mut harness, &mut report, &channel_link).await;
     } else {
@@ -188,13 +221,13 @@ async fn main() -> AnyResult<()> {
         );
     }
 
+    let mut webhook_registration = None;
     let disabled_webhook_subscriptions = match config.transport {
         UpdateTransport::LongPolling => {
             let Some(disabled) =
                 prepare_long_polling_phase(&mut harness, &mut report, &config).await?
             else {
-                report.print_summary(lang);
-                return Ok(());
+                return report.finish(lang);
             };
 
             match harness.flush_updates().await {
@@ -213,8 +246,7 @@ async fn main() -> AnyResult<()> {
                     report.fail("bot.get_updates", err.to_string());
                     restore_disabled_webhooks(&mut harness, &mut report, &config, &disabled)
                         .await?;
-                    report.print_summary(lang);
-                    return Ok(());
+                    return report.finish(lang);
                 }
             }
 
@@ -271,10 +303,12 @@ async fn main() -> AnyResult<()> {
             disabled
         }
         UpdateTransport::Webhook => {
-            if !prepare_webhook_phase(&mut harness, &mut report, &config).await? {
-                report.print_summary(lang);
-                return Ok(());
+            let (ready, registration) =
+                prepare_webhook_phase(&mut harness, &mut report, &config).await?;
+            if !ready {
+                return report.finish(lang);
             }
+            webhook_registration = registration;
             skip_cases(
                 &mut report,
                 &[
@@ -305,7 +339,13 @@ async fn main() -> AnyResult<()> {
         )
         .await?;
         run_webhook_phase(&mut harness, &mut report, &config).await?;
-        run_commands_phase(&mut harness, &mut report, lang).await?;
+        run_commands_phase(
+            &mut harness,
+            &mut report,
+            lang,
+            me.commands.clone().unwrap_or_default(),
+        )
+        .await?;
         run_group_phase(&mut harness, &mut report, &config, private_phase.user_id).await?;
         Ok::<(), Box<dyn Error>>(())
     }
@@ -315,6 +355,13 @@ async fn main() -> AnyResult<()> {
         report.fail("live_test", err.to_string());
     }
 
+    cleanup_webhook_registration(
+        &mut harness,
+        &mut report,
+        &config,
+        webhook_registration.as_ref(),
+    )
+    .await?;
     restore_disabled_webhooks(
         &mut harness,
         &mut report,
@@ -323,8 +370,7 @@ async fn main() -> AnyResult<()> {
     )
     .await?;
 
-    report.print_summary(lang);
-    Ok(())
+    report.finish(lang)
 }
 
 async fn run_get_chat_by_link_probe(
@@ -656,7 +702,6 @@ async fn run_private_phase(
             vec![Button::callback(callback_button_text, "live:callback")],
             vec![Button::Message {
                 text: message_button_text.into(),
-                intent: None,
             }],
             vec![Button::RequestContact {
                 text: contact_button_text.into(),
@@ -1115,13 +1160,10 @@ async fn run_private_phase(
 
             if let Some(update) = contact_update {
                 if let Some(details) = extract_contact_details(&update, &config.token) {
-                    if let Some(phone) = details.phone() {
+                    if details.phone().is_some() {
                         report.pass(
                             "manual.contact_phone_present",
-                            match lang {
-                                Language::English => format!("phone={phone}"),
-                                Language::Russian => format!("телефон={phone}"),
-                            },
+                            tr(lang, "phone is present", "телефон присутствует"),
                         );
                     } else {
                         report.skip(
@@ -1157,13 +1199,10 @@ async fn run_private_phase(
                         ),
                     }
 
-                    if let Some(user_id) = details.max_user_id {
+                    if details.max_user_id.is_some() {
                         report.pass(
                             "manual.contact_max_info_present",
-                            match lang {
-                                Language::English => format!("max_info.user_id={user_id}"),
-                                Language::Russian => format!("max_info.user_id={user_id}"),
-                            },
+                            tr(lang, "max_info is present", "max_info присутствует"),
                         );
                     } else {
                         report.skip(
@@ -1171,13 +1210,10 @@ async fn run_private_phase(
                             tr(lang, "max_info is missing", "max_info отсутствует"),
                         );
                     }
-                } else if let Some(phone) = extract_contact_phone(&update) {
+                } else if extract_contact_phone(&update).is_some() {
                     report.pass(
                         "manual.contact_phone_present",
-                        match lang {
-                            Language::English => format!("phone={phone}"),
-                            Language::Russian => format!("телефон={phone}"),
-                        },
+                        tr(lang, "phone is present", "телефон присутствует"),
                     );
                     report.skip(
                         "manual.contact_hash_valid",
@@ -1831,12 +1867,19 @@ async fn restore_disabled_webhooks(
     Ok(())
 }
 
+#[derive(Clone)]
+struct WebhookRegistration {
+    url: String,
+    previous: Option<Subscription>,
+}
+
 async fn prepare_webhook_phase(
     harness: &mut Harness,
     report: &mut Report,
     config: &Config,
-) -> AnyResult<bool> {
+) -> AnyResult<(bool, Option<WebhookRegistration>)> {
     let lang = config.lang;
+    let mut registration = None;
 
     if config.webhook_register {
         let Some(url) = config.webhook_url.clone() else {
@@ -1848,9 +1891,55 @@ async fn prepare_webhook_phase(
                     "запрошена регистрация webhook, но webhook URL пустой",
                 ),
             );
-            return Ok(false);
+            return Ok((false, None));
         };
 
+        let Some(subscriptions) = harness
+            .api_case(
+                report,
+                "bot.get_subscriptions(pre_webhook_register)",
+                |bot| async move { bot.get_subscriptions().await },
+            )
+            .await
+        else {
+            report.skip(
+                "bot.subscribe(webhook_transport)",
+                tr(
+                    lang,
+                    "existing subscriptions could not be captured for cleanup",
+                    "не удалось сохранить существующие subscriptions для cleanup",
+                ),
+            );
+            return Ok((false, None));
+        };
+        let previous = subscriptions
+            .subscriptions
+            .into_iter()
+            .find(|subscription| subscription.url == url);
+        if previous.is_some()
+            && config.webhook_secret.is_none()
+            && !confirm(
+                lang,
+                tr(
+                    lang,
+                    "A subscription already exists at this URL, but MAX_WEBHOOK_SECRET is unset. Continue only if the existing subscription has no secret?",
+                    "Subscription с этим URL уже существует, но MAX_WEBHOOK_SECRET не задан. Продолжить, только если у существующей subscription нет secret?",
+                ),
+                false,
+            )?
+        {
+            report.skip(
+                "bot.subscribe(webhook_transport)",
+                tr(
+                    lang,
+                    "existing webhook could not be restored safely without its secret",
+                    "существующий webhook нельзя безопасно восстановить без его secret",
+                ),
+            );
+            return Ok((false, None));
+        }
+
+        let subscribe_url = url.clone();
         let secret = config.webhook_secret.clone();
         let subscribed = harness
             .api_case(
@@ -1858,7 +1947,7 @@ async fn prepare_webhook_phase(
                 "bot.subscribe(webhook_transport)",
                 move |bot| async move {
                     bot.subscribe(SubscribeBody {
-                        url,
+                        url: subscribe_url,
                         update_types: None,
                         version: None,
                         secret,
@@ -1870,8 +1959,9 @@ async fn prepare_webhook_phase(
             .is_some();
 
         if !subscribed {
-            return Ok(false);
+            return Ok((false, None));
         }
+        registration = Some(WebhookRegistration { url, previous });
     } else {
         report.skip(
             "bot.subscribe(webhook_transport)",
@@ -1891,7 +1981,65 @@ async fn prepare_webhook_phase(
             "локальный webhook receiver запущен; ручные ожидания будут использовать webhook updates",
         ),
     );
-    Ok(true)
+    Ok((true, registration))
+}
+
+async fn cleanup_webhook_registration(
+    harness: &mut Harness,
+    report: &mut Report,
+    config: &Config,
+    registration: Option<&WebhookRegistration>,
+) -> AnyResult<()> {
+    let Some(registration) = registration else {
+        return Ok(());
+    };
+
+    print_section(tr(
+        config.lang,
+        "Webhook Transport Cleanup",
+        "Cleanup webhook-транспорта",
+    ));
+    let url = registration.url.clone();
+    let removed = harness
+        .api_case(
+            report,
+            "bot.unsubscribe(webhook_transport_cleanup)",
+            move |bot| async move { bot.unsubscribe(&url).await },
+        )
+        .await
+        .is_some();
+
+    if let Some(previous) = registration.previous.clone() {
+        if removed {
+            let secret = config.webhook_secret.clone();
+            let _ = harness
+                .api_case(
+                    report,
+                    "bot.subscribe(webhook_transport_restore)",
+                    move |bot| async move {
+                        bot.subscribe(SubscribeBody {
+                            url: previous.url,
+                            update_types: previous.update_types,
+                            version: previous.version,
+                            secret,
+                        })
+                        .await
+                    },
+                )
+                .await;
+        } else {
+            report.skip(
+                "bot.subscribe(webhook_transport_restore)",
+                tr(
+                    config.lang,
+                    "temporary webhook subscription could not be removed",
+                    "не удалось удалить временную webhook subscription",
+                ),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_upload_phase(
@@ -2260,6 +2408,16 @@ async fn run_upload_phase(
         );
     }
 
+    if config.upload_file_path.is_none() {
+        match std::fs::remove_file(&upload_path) {
+            Ok(()) => report.pass(
+                "cleanup.temporary_upload_file",
+                tr(lang, "temporary file removed", "временный файл удалён"),
+            ),
+            Err(error) => report.fail("cleanup.temporary_upload_file", error.to_string()),
+        }
+    }
+
     Ok(())
 }
 
@@ -2332,6 +2490,7 @@ async fn run_commands_phase(
     harness: &mut Harness,
     report: &mut Report,
     lang: Language,
+    previous_commands: Vec<BotCommand>,
 ) -> AnyResult<()> {
     print_section(tr(lang, "Commands", "Команды"));
 
@@ -2339,60 +2498,78 @@ async fn run_commands_phase(
         lang,
         tr(
             lang,
-            "Probe experimental bot.set_my_commands? The public MAX REST API does not currently document a write endpoint and may return 404. This also changes the bot command menu and is not restored automatically. Type `y` to proceed.",
-            "Проверить экспериментальный bot.set_my_commands? Публичный REST API MAX сейчас не документирует write-эндпоинт и может вернуть 404. Также это изменит меню команд бота и автоматически не откатывается. Введите `y`, чтобы продолжить.",
+            "Temporarily replace the bot command menu through PATCH /me/commands? The captured menu will be restored immediately afterward. Type `y` to proceed.",
+            "Временно заменить меню команд бота через PATCH /me/commands? Сохранённое меню будет восстановлено сразу после проверки. Введите `y`, чтобы продолжить.",
         ),
         false,
     )? {
         let commands = vec![
             BotCommand {
                 name: "live".into(),
-                description: "Run the live API test".into(),
+                description: Some("Run the live API test".into()),
             },
             BotCommand {
                 name: "group_live".into(),
-                description: "Trigger the group phase".into(),
+                description: Some("Trigger the group phase".into()),
             },
         ];
-        harness.pause().await;
-        print_case("bot.set_my_commands");
-        let bot = harness.bot.clone();
-        match bot.set_my_commands(commands).await {
-            Ok(_) => {
-                report.pass("bot.set_my_commands", tr(lang, "ok", "ok"));
-                println!("   PASS");
-            }
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("/me/commands")
-                    && err_text.contains("404")
-                    && err_text.contains("not recognized")
-                {
-                    let detail = tr(
-                        lang,
-                        "public MAX API does not currently expose POST /me/commands; treating this as a platform gap",
-                        "публичный MAX API сейчас не предоставляет POST /me/commands; шаг помечен как платформенное ограничение",
-                    );
-                    report.skip("bot.set_my_commands", detail);
-                    println!("   SKIP: {detail}");
-                } else {
-                    report.fail("bot.set_my_commands", err_text.clone());
-                    println!("   FAIL: {err}");
-                }
-            }
+        let changed = harness
+            .api_case(report, "bot.set_my_commands", move |bot| async move {
+                bot.set_my_commands(commands).await
+            })
+            .await
+            .is_some();
+
+        if changed {
+            let _ = harness
+                .api_case(
+                    report,
+                    "bot.set_my_commands(restore)",
+                    move |bot| async move { bot.set_my_commands(previous_commands).await },
+                )
+                .await;
+        } else {
+            report.skip(
+                "bot.set_my_commands(restore)",
+                tr(
+                    lang,
+                    "temporary command menu was not applied",
+                    "временное меню команд не было применено",
+                ),
+            );
         }
     } else {
-        report.skip(
-            "bot.set_my_commands",
+        skip_cases(
+            report,
+            &["bot.set_my_commands", "bot.set_my_commands(restore)"],
             tr(
                 lang,
-                "tester did not confirm probing the experimental command-menu endpoint",
-                "тестер не подтвердил проверку экспериментального эндпоинта меню команд",
+                "tester did not confirm changing the command menu",
+                "тестер не подтвердил изменение меню команд",
             ),
         );
     }
 
     Ok(())
+}
+
+fn run_comments_phase(report: &mut Report, lang: Language) {
+    print_section(tr(lang, "Comments", "Комментарии"));
+    skip_cases(
+        report,
+        &[
+            "bot.get_comments",
+            "bot.get_comment",
+            "bot.create_comment",
+            "bot.edit_comment",
+            "bot.delete_comment",
+        ],
+        tr(
+            lang,
+            "MAX currently marks all documented comments endpoints as temporarily unavailable",
+            "MAX сейчас помечает все документированные endpoints комментариев как временно недоступные",
+        ),
+    );
 }
 
 async fn run_group_phase(
@@ -3168,8 +3345,8 @@ async fn wait_for_chat_button_creation_raw(
 ) -> Option<i64> {
     let instructions = tr(
         lang,
-        "Tap the chat button in MAX. It will create a real chat. The full incoming update JSON will be printed.",
-        "Нажмите chat-кнопку в MAX. Она создаст настоящий чат. Полный входящий JSON update будет напечатан.",
+        "Tap the chat button in MAX. It will create a real chat. The update type and cleanup identifiers will be reported without dumping the response body.",
+        "Нажмите chat-кнопку в MAX. Она создаст настоящий чат. Тип update и идентификаторы cleanup будут показаны без вывода response body.",
     );
 
     if harness.transport == UpdateTransport::Webhook {
@@ -3271,13 +3448,13 @@ impl Config {
             "{}",
             tr(
                 lang,
-                "Secrets entered here are echoed in the terminal.",
-                "Секреты, введённые здесь, будут отображаться в терминале.",
+                "MAX_BOT_TOKEN and MAX_WEBHOOK_SECRET take precedence; missing values are requested with masked input.",
+                "MAX_BOT_TOKEN и MAX_WEBHOOK_SECRET имеют приоритет; отсутствующие значения запрашиваются с маскированным вводом.",
             )
         );
 
         let transport = UpdateTransport::prompt(lang)?;
-        let token = prompt_required(lang, tr(lang, "Bot token", "Токен бота"))?;
+        let token = required_secret("MAX_BOT_TOKEN", lang, tr(lang, "Bot token", "Токен бота"))?;
         let bot_link = prompt_optional(
             lang,
             tr(
@@ -3308,12 +3485,13 @@ impl Config {
             )
         };
         let webhook_url = prompt_optional(lang, webhook_url_label)?;
-        let webhook_secret = prompt_optional(
+        let webhook_secret = optional_secret(
+            "MAX_WEBHOOK_SECRET",
             lang,
             tr(
                 lang,
-                "Webhook secret for webhook mode and restoring temporarily disabled subscriptions (optional)",
-                "Webhook secret для webhook-режима и восстановления временно отключённых subscriptions (необязательно)",
+                "Webhook secret (optional, press Enter to skip)",
+                "Webhook secret (необязательно, нажмите Enter для пропуска)",
             ),
         )?;
         let (webhook_listen_addr, webhook_register) = if transport == UpdateTransport::Webhook {
@@ -3841,11 +4019,10 @@ impl Harness {
                         "   {}",
                         tr(
                             self.lang,
-                            "Raw incoming update JSON:",
-                            "Полный входящий JSON update:",
+                            "Raw update body retained in memory for this check and omitted from output.",
+                            "Raw body update сохранён в памяти для этой проверки и не выводится.",
                         )
                     );
-                    print_json_value(&update);
                     return Some(update);
                 }
                 Ok(None) => match prompt_wait_decision(self.lang) {
@@ -4052,6 +4229,27 @@ impl Report {
         });
     }
 
+    fn failed_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| matches!(record.outcome, Outcome::Failed(_)))
+            .count()
+    }
+
+    fn finish(&self, lang: Language) -> AnyResult<()> {
+        self.print_summary(lang);
+        let failed = self.failed_count();
+        if failed == 0 {
+            Ok(())
+        } else {
+            let message = match lang {
+                Language::English => format!("live API test completed with {failed} failure(s)"),
+                Language::Russian => format!("live API test завершён с ошибками: {failed}"),
+            };
+            Err(io::Error::other(message).into())
+        }
+    }
+
     fn print_summary(&self, lang: Language) {
         print_section(tr(lang, "Summary", "Сводка"));
 
@@ -4060,11 +4258,7 @@ impl Report {
             .iter()
             .filter(|record| matches!(record.outcome, Outcome::Passed(_)))
             .count();
-        let failed = self
-            .records
-            .iter()
-            .filter(|record| matches!(record.outcome, Outcome::Failed(_)))
-            .count();
+        let failed = self.failed_count();
         let skipped = self
             .records
             .iter()
@@ -4185,7 +4379,7 @@ fn looks_like_client_map_card(message: &Message) -> bool {
     }
 
     if let Some(constructor) = &message.constructor {
-        haystack.push_str(&constructor.to_string());
+        haystack.push_str(&serde_json::to_string(constructor).unwrap_or_default());
     }
 
     if let Some(attachments) = &message.body.attachments {
@@ -4220,10 +4414,7 @@ fn is_chat_button_platform_rejection(error: &str) -> bool {
 }
 
 fn is_chat_link_not_found_error(error: &MaxError) -> bool {
-    matches!(
-        error,
-        MaxError::Api { code: 404, message } if message.contains("Chat not found by link")
-    )
+    matches!(error, MaxError::Api(error) if error.status == 404)
 }
 
 fn tls_trust_hint(error: &MaxError, lang: Language) -> Option<&'static str> {
@@ -4356,7 +4547,10 @@ fn log_non_matching_raw_update(
                 "Получен неподходящий raw update во время ожидания:",
             )
         );
-        print_json_value(update);
+        println!(
+            "   update_type: {}",
+            raw_update_type(update).unwrap_or("unknown")
+        );
         *logged_non_matching += 1;
     } else if *logged_non_matching == MAX_NON_MATCHING_UPDATE_LOGS {
         println!(
@@ -4449,7 +4643,7 @@ fn print_update_details(lang: Language, update: &Update) {
 
     match update {
         Update::MessageCallback { callback, .. } => {
-            println!("   callback_id: {}", callback.callback_id);
+            println!("   callback_id: <redacted>");
             println!(
                 "   {}: {}",
                 tr(lang, "user_id", "user_id"),
@@ -4486,10 +4680,11 @@ fn print_update_details(lang: Language, update: &Update) {
                 println!("   markup: {kinds}");
             }
             if let Some(url) = &message.url {
-                println!("   url: {url}");
+                let _ = url;
+                println!("   url: <redacted>");
             }
-            if let Some(constructor) = &message.constructor {
-                println!("   constructor: {constructor}");
+            if message.constructor.is_some() {
+                println!("   constructor: present");
             }
             if let Some(attachments) = &message.body.attachments {
                 for attachment in attachments {
@@ -4502,22 +4697,22 @@ fn print_update_details(lang: Language, update: &Update) {
                         Attachment::Image { payload }
                         | Attachment::Video { payload }
                         | Attachment::Audio { payload } => {
-                            if let Some(url) = &payload.url {
-                                println!("   attachment_url: {url}");
+                            if payload.url.is_some() {
+                                println!("   attachment_url: <redacted>");
                             }
-                            if let Some(token) = &payload.token {
-                                println!("   attachment_token: {token}");
+                            if payload.token.is_some() {
+                                println!("   attachment_token: <redacted>");
                             }
                             if let Some(photo_id) = payload.photo_id {
                                 println!("   photo_id: {photo_id}");
                             }
                         }
                         Attachment::File { payload } => {
-                            if let Some(url) = &payload.url {
-                                println!("   attachment_url: {url}");
+                            if payload.url.is_some() {
+                                println!("   attachment_url: <redacted>");
                             }
-                            if let Some(token) = &payload.token {
-                                println!("   attachment_token: {token}");
+                            if payload.token.is_some() {
+                                println!("   attachment_token: <redacted>");
                             }
                             if let Some(filename) = &payload.filename {
                                 println!("   filename: {filename}");
@@ -4528,51 +4723,36 @@ fn print_update_details(lang: Language, update: &Update) {
                         }
                         Attachment::Contact { payload } => {
                             println!(
-                                "   {}: {:?}",
-                                tr(lang, "contact_name", "имя_контакта"),
-                                payload.name
+                                "   {}: {}",
+                                tr(lang, "contact_name_present", "имя_контакта_присутствует"),
+                                payload.name.is_some()
                             );
+                            println!("   contact_id_present: {}", payload.contact_id.is_some());
                             println!(
-                                "   {}: {:?}",
-                                tr(lang, "contact_id", "contact_id"),
-                                payload.contact_id
-                            );
-                            println!(
-                                "   {}: {:?}",
-                                tr(lang, "phone", "телефон"),
-                                payload.vcf_phone
+                                "   {}: {}",
+                                tr(lang, "phone_present", "телефон_присутствует"),
+                                payload.vcf_phone.is_some()
                             );
                             let vcf_phones = payload.phones_from_vcf();
                             if !vcf_phones.is_empty() {
-                                println!("   vcf_phones: {}", vcf_phones.join(","));
+                                println!("   vcf_phone_count: {}", vcf_phones.len());
                             }
-                            println!("   contact_hash: {:?}", payload.hash);
-                            if let Some(max_info) = &payload.max_info {
-                                println!("   max_info.user_id: {}", max_info.user_id);
-                            }
+                            println!("   contact_hash_present: {}", payload.hash.is_some());
+                            println!("   max_info_present: {}", payload.max_info.is_some());
                         }
-                        Attachment::Location { payload } => {
-                            println!(
-                                "   {}: {}, {}: {}",
-                                tr(lang, "latitude", "широта"),
-                                payload.latitude,
-                                tr(lang, "longitude", "долгота"),
-                                payload.longitude
-                            );
+                        Attachment::Location { .. } => {
+                            println!("   coordinates: <redacted>");
                         }
-                        Attachment::Unknown { payload, raw, .. } => {
-                            if let Some(payload) = payload {
-                                println!("   attachment_payload: {payload}");
-                            }
-                            println!("   attachment_raw: {raw}");
+                        Attachment::Unknown { .. } => {
+                            println!("   attachment_raw: <omitted>");
                         }
                         _ => {}
                     }
                 }
             }
         }
-        Update::Unknown { raw, .. } => {
-            println!("   raw_update: {raw}");
+        Update::Unknown { .. } => {
+            println!("   raw_update: <omitted>");
         }
         Update::MessageEditedMissing { .. } => {
             println!(
@@ -4708,9 +4888,14 @@ fn confirm_case(lang: Language, report: &mut Report, name: &str, question: &str)
     Ok(())
 }
 
-fn prompt_required(lang: Language, label: &str) -> AnyResult<String> {
+fn required_secret(name: &str, lang: Language, label: &str) -> AnyResult<String> {
+    if let Some(value) = secret_from_env(name)? {
+        print_secret_source(name, lang);
+        return Ok(value);
+    }
+
     loop {
-        let value = prompt(label)?;
+        let value = prompt_masked_secret(label)?;
         if !value.is_empty() {
             return Ok(value);
         }
@@ -4718,6 +4903,51 @@ fn prompt_required(lang: Language, label: &str) -> AnyResult<String> {
             "{}",
             tr(lang, "Value is required.", "Значение обязательно.")
         );
+    }
+}
+
+fn optional_secret(name: &str, lang: Language, label: &str) -> AnyResult<Option<String>> {
+    if let Some(value) = secret_from_env(name)? {
+        print_secret_source(name, lang);
+        return Ok(Some(value));
+    }
+
+    let value = prompt_masked_secret(label)?;
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn secret_from_env(name: &str) -> AnyResult<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name} is not valid UTF-8"),
+        )
+        .into()),
+    }
+}
+
+fn prompt_masked_secret(label: &str) -> AnyResult<String> {
+    Password::new(label)
+        .with_display_mode(PasswordDisplayMode::Masked)
+        .with_formatter(&|value| {
+            if value.is_empty() {
+                "<not set>".into()
+            } else {
+                "********".into()
+            }
+        })
+        .without_confirmation()
+        .prompt()
+        .map_err(Into::into)
+}
+
+fn print_secret_source(name: &str, lang: Language) {
+    match lang {
+        Language::English => println!("Using {name} from the environment."),
+        Language::Russian => println!("Используется {name} из environment."),
     }
 }
 

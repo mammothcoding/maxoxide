@@ -6,10 +6,11 @@ use crate::{
     RussianTlsExt,
     dispatcher::Filter,
     types::{
-        AnswerCallbackBody, Attachment, AttachmentKind, Button, Callback, Chat,
-        ChatAdminPermission, ChatMember, ChatStatus, ChatType, KeyboardPayload, MarkupElement,
-        Message, MessageBody, MessageFormat, NewAttachment, NewMessageBody, PhotoToken, Recipient,
-        SenderAction, SubscribeBody, Update, UploadType, User,
+        AnswerCallbackBody, Attachment, AttachmentKind, BotInfo, Button, Callback, Chat,
+        ChatAdminPermission, ChatMember, ChatStatus, ChatType, ContactAttachmentPayload,
+        KeyboardPayload, MarkupElement, Message, MessageBody, MessageFormat, NewAttachment,
+        NewCommentBody, NewMessageBody, PhotoToken, Recipient, SenderAction,
+        ShareAttachmentPayload, SubscribeBody, Update, UploadType, User,
     },
 };
 use std::{collections::BTreeMap, time::Duration};
@@ -43,6 +44,7 @@ fn make_message(chat_id: i64, text: &str) -> Message {
             chat_id,
             chat_type: ChatType::Dialog,
             user_id: Some(1),
+            post_id: None,
         },
         timestamp: 1_700_000_000,
         link: None,
@@ -606,13 +608,23 @@ fn test_filter_callback() {
 }
 
 #[test]
-fn test_filter_command_matches_prefix() {
+fn test_filter_command_accepts_arguments_but_not_command_prefixes() {
     let update = Update::MessageCreated {
         timestamp: 0,
         message: make_message(1, "/start payload"),
     };
     assert!(Filter::Command("/start".into()).matches(&update));
     assert!(!Filter::Command("/help".into()).matches(&update));
+    let prefixed = Update::MessageCreated {
+        timestamp: 0,
+        message: make_message(1, "/starter"),
+    };
+    assert!(!Filter::Command("/start".into()).matches(&prefixed));
+    let mentioned = Update::MessageCreated {
+        timestamp: 0,
+        message: make_message(1, "/start@my_bot payload"),
+    };
+    assert!(Filter::Command("/start".into()).matches(&mentioned));
 }
 
 #[test]
@@ -799,4 +811,126 @@ fn test_filter_attachment_kinds() {
     assert!(Filter::has_file().matches(&update));
     assert!(Filter::has_attachment_type(AttachmentKind::File).matches(&update));
     assert!(!Filter::has_media().matches(&update));
+}
+
+#[test]
+fn test_bot_info_and_optional_command_description() {
+    let bot: BotInfo = serde_json::from_str(
+        r#"{
+            "user_id": 7,
+            "name": "Legacy Bot",
+            "is_bot": true,
+            "commands": [{"name":"start"}]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(bot.first_name, "Legacy Bot");
+    assert_eq!(bot.commands.unwrap()[0].description, None);
+}
+
+#[test]
+fn test_new_constructed_updates_and_bot_stopped_payload() {
+    let request: Update = serde_json::from_str(
+        r#"{
+            "update_type":"message_construction_request",
+            "timestamp":1000,
+            "user":{"user_id":7,"first_name":"User"},
+            "user_locale":"ru",
+            "session_id":"session",
+            "data":"payload",
+            "input":{"key":"value"}
+        }"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        request,
+        Update::MessageConstructionRequest { ref session_id, .. } if session_id == "session"
+    ));
+
+    let constructed: Update = serde_json::from_str(
+        r#"{
+            "update_type":"message_constructed",
+            "timestamp":1001,
+            "user":{"user_id":7,"first_name":"User"},
+            "session_id":"session",
+            "message":{
+                "sender":{"user_id":7,"first_name":"User"},
+                "timestamp":1001,
+                "body":{"mid":"mid","seq":1,"text":"ready"}
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(matches!(constructed, Update::MessageConstructed { .. }));
+
+    let stopped: Update = serde_json::from_str(
+        r#"{
+            "update_type":"bot_stopped",
+            "timestamp":1002,
+            "chat_id":8,
+            "user":{"user_id":7,"first_name":"User"},
+            "payload":"reason"
+        }"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        stopped,
+        Update::BotStopped { payload: Some(ref payload), .. } if payload == "reason"
+    ));
+}
+
+#[test]
+fn test_new_attachment_variants_and_validation() {
+    let attachments = vec![
+        NewAttachment::sticker("sticker-code"),
+        NewAttachment::contact(ContactAttachmentPayload {
+            name: Some("User".into()),
+            contact_id: Some(7),
+            ..Default::default()
+        }),
+        NewAttachment::location(55.75, 37.61),
+        NewAttachment::share(ShareAttachmentPayload {
+            url: Some("https://max.ru".into()),
+            token: None,
+        }),
+    ];
+    let body = NewMessageBody::text("attachments").with_attachments(attachments);
+    assert!(body.validate().is_ok());
+    let json = serde_json::to_value(body).unwrap();
+    assert_eq!(json["attachments"][2]["type"], "location");
+    assert_eq!(json["attachments"][2]["latitude"], 55.75);
+
+    let invalid = NewMessageBody::text("x".repeat(4001));
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn test_keyboard_and_comment_validation() {
+    let keyboard = KeyboardPayload {
+        buttons: vec![vec![
+            Button::link("one", "https://example.com/1"),
+            Button::callback("two", "2"),
+            Button::callback("three", "3"),
+            Button::callback("four", "4"),
+        ]],
+    };
+    assert!(keyboard.validate().is_err());
+
+    let comment = NewCommentBody::text("reply").with_reply_to("comment-id");
+    assert!(comment.validate().is_ok());
+    let mut forward = NewCommentBody::text("forward");
+    forward.link = Some(crate::types::NewMessageLink {
+        r#type: crate::types::LinkType::Forward,
+        mid: "comment-id".into(),
+    });
+    assert!(forward.validate().is_err());
+}
+
+#[test]
+fn test_view_stats_permission_and_recipient_post_id() {
+    let permission: ChatAdminPermission = serde_json::from_str(r#""view_stats""#).unwrap();
+    assert_eq!(permission, ChatAdminPermission::ViewStats);
+    let recipient: Recipient =
+        serde_json::from_str(r#"{"chat_id":8,"chat_type":"channel","post_id":"post-id"}"#).unwrap();
+    assert_eq!(recipient.post_id.as_deref(), Some("post-id"));
 }

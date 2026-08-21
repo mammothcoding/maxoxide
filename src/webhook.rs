@@ -1,182 +1,303 @@
-//! Axum-based Webhook server for receiving updates through HTTPS callbacks.
+//! Framework-neutral webhook processing with optional Axum and Actix adapters.
 //!
-//! Enabled with `features = ["webhook"]`.
-//!
-//! ## How it works
-//!
-//! 1. Your bot registers a webhook via [`Bot::subscribe`].
-//! 2. Max sends `POST /` (or any path you choose) with a single [`Update`] JSON body
-//!    and an optional `X-Max-Bot-Api-Secret` header.
-//! 3. [`WebhookServer`] verifies the secret, parses the update and passes it to
-//!    [`Dispatcher`].
-//!
-//! ## Requirements from Max API
-//!
-//! * Endpoint must be reachable over **HTTPS on port 443**.
-//! * No self-signed certificates.
-//! * Must return **HTTP 200** within 30 seconds.
-//!
-//! ## Example
-//!
-//! ```no_run
-//! use maxoxide::{Bot, Dispatcher, Context};
-//! use maxoxide::types::{Update, SubscribeBody};
-//! use maxoxide::webhook::WebhookServer;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let bot = Bot::from_env();
-//!     let mut dp = Dispatcher::new(bot.clone());
-//!
-//!     dp.on_message(|ctx: Context| async move {
-//!         if let Update::MessageCreated { message, .. } = &ctx.update {
-//!             ctx.bot
-//!                 .send_text_to_chat(message.chat_id(), message.text().unwrap_or(""))
-//!                 .await?;
-//!         }
-//!         Ok(())
-//!     });
-//!
-//!     // Register webhook with Max
-//!     bot.subscribe(SubscribeBody {
-//!         url: "https://your-domain.com/webhook".into(),
-//!         update_types: None,
-//!         version: None,
-//!         secret: Some("my_secret_123".into()),
-//!     })
-//!     .await
-//!     .unwrap();
-//!
-//!     // Start the server (listens on 0.0.0.0:443 or behind a TLS-terminating proxy)
-//!     WebhookServer::new(dp)
-//!         .secret("my_secret_123")
-//!         .path("/webhook")
-//!         .serve("0.0.0.0:8443")
-//!         .await;
-//! }
-//! ```
+//! [`WebhookService`] owns the MAX-specific behavior: secret verification,
+//! payload limits, parsing, backpressure, dispatch timeout, and handler errors.
+//! Web frameworks only translate their request and response types.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{sync::Arc, time::Duration};
 
-use axum::{
-    Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
+use tracing::{error, warn};
+
+use crate::{
+    dispatcher::{Dispatcher, DispatcherShutdown},
+    errors::{MaxError, Result},
 };
-use bytes::Bytes;
-use tracing::{error, info, warn};
 
-use crate::dispatcher::Dispatcher;
+/// Header MAX sends when a webhook subscription has a shared secret.
+pub const SECRET_HEADER: &str = "x-max-bot-api-secret";
 
-// ────────────────────────────────────────────────
-// WebhookServer
-// ────────────────────────────────────────────────
-
-/// An axum-based HTTPS webhook receiver for the Max Bot API.
-pub struct WebhookServer {
-    dispatcher: Arc<Dispatcher>,
-    secret: Option<String>,
-    path: String,
+/// Framework-independent webhook response classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookOutcome {
+    /// The payload was accepted and all matching handlers succeeded.
+    Accepted,
+    /// The request body was not a valid MAX update object.
+    BadRequest,
+    /// The configured shared secret was absent or incorrect.
+    Unauthorized,
+    /// The request exceeded the configured body-size limit.
+    PayloadTooLarge,
+    /// The service reached its configured in-flight request limit.
+    Busy,
+    /// Dispatcher processing exceeded the configured timeout.
+    DispatchTimedOut,
+    /// A dispatcher handler returned an error.
+    HandlerFailed,
 }
 
-impl WebhookServer {
-    /// Create a new webhook server backed by the given dispatcher.
+impl WebhookOutcome {
+    /// HTTP status code adapters should return for this outcome.
+    pub const fn status_code(self) -> u16 {
+        match self {
+            Self::Accepted => 200,
+            Self::BadRequest => 400,
+            Self::Unauthorized => 401,
+            Self::PayloadTooLarge => 413,
+            Self::Busy => 503,
+            Self::DispatchTimedOut => 503,
+            Self::HandlerFailed => 500,
+        }
+    }
+}
+
+/// Shared MAX webhook processor used by every framework adapter.
+#[derive(Clone)]
+pub struct WebhookService {
+    dispatcher: Arc<Dispatcher>,
+    secret_digest: Option<[u8; 32]>,
+    max_body_size: usize,
+    dispatch_timeout: Duration,
+    in_flight: Arc<Semaphore>,
+}
+
+impl WebhookService {
+    /// Creates a service with a 1 MiB body limit, 25-second dispatch timeout,
+    /// and at most 64 concurrently processed requests.
     pub fn new(dispatcher: Dispatcher) -> Self {
+        Self::from_shared(Arc::new(dispatcher))
+    }
+
+    /// Creates a service around an already shared dispatcher.
+    pub fn from_shared(dispatcher: Arc<Dispatcher>) -> Self {
         Self {
-            dispatcher: Arc::new(dispatcher),
-            secret: None,
-            path: "/".into(),
+            dispatcher,
+            secret_digest: None,
+            max_body_size: 1024 * 1024,
+            dispatch_timeout: Duration::from_secs(25),
+            in_flight: Arc::new(Semaphore::new(64)),
         }
     }
 
-    /// Set the shared secret used to verify `X-Max-Bot-Api-Secret` headers.
-    /// Strongly recommended — rejects any request that doesn't match.
-    pub fn secret(mut self, secret: impl Into<String>) -> Self {
-        self.secret = Some(secret.into());
-        self
+    /// Requires the subscription secret without storing it in plaintext.
+    pub fn secret(mut self, secret: impl AsRef<[u8]>) -> Result<Self> {
+        let secret = secret.as_ref();
+        if secret.is_empty() {
+            return Err(MaxError::Configuration(
+                "webhook secret must not be empty".into(),
+            ));
+        }
+        self.secret_digest = Some(Sha256::digest(secret).into());
+        Ok(self)
     }
 
-    /// Set the URL path to listen on (default: `/`).
-    pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = path.into();
-        self
+    /// Replaces the maximum accepted JSON request size.
+    pub fn max_body_size(mut self, bytes: usize) -> Result<Self> {
+        if bytes == 0 {
+            return Err(MaxError::Configuration(
+                "webhook body limit must be greater than zero".into(),
+            ));
+        }
+        self.max_body_size = bytes;
+        Ok(self)
     }
 
-    /// Start listening on the given address (e.g. `"0.0.0.0:8443"`).
-    ///
-    /// This function runs forever (or until the process exits).
-    ///
-    /// For public webhook deployments, put a TLS-terminating reverse proxy (nginx, Caddy, ...) in
-    /// front of this and expose it on port 443 as required by the Max API.
-    pub async fn serve(self, addr: impl Into<String>) {
-        let addr: SocketAddr = addr
-            .into()
-            .parse()
-            .expect("Invalid socket address for webhook server");
+    /// Replaces the time allowed for dispatcher processing.
+    pub fn dispatch_timeout(mut self, timeout: Duration) -> Result<Self> {
+        if timeout.is_zero() {
+            return Err(MaxError::Configuration(
+                "webhook dispatch timeout must be greater than zero".into(),
+            ));
+        }
+        self.dispatch_timeout = timeout;
+        Ok(self)
+    }
 
-        let state = Arc::new(WebhookState {
-            dispatcher: self.dispatcher,
-            secret: self.secret,
-        });
+    /// Replaces the maximum number of in-flight webhook requests.
+    pub fn max_in_flight(mut self, maximum: usize) -> Result<Self> {
+        if maximum == 0 {
+            return Err(MaxError::Configuration(
+                "webhook in-flight limit must be greater than zero".into(),
+            ));
+        }
+        self.in_flight = Arc::new(Semaphore::new(maximum));
+        Ok(self)
+    }
 
-        let app = Router::new()
-            .route(&self.path, post(handle_update))
-            .with_state(state);
+    /// Returns the configured request body limit.
+    pub const fn body_limit(&self) -> usize {
+        self.max_body_size
+    }
 
-        info!("Webhook server listening on {addr}");
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+    /// Returns a handle that can stop polling/scheduled dispatcher work.
+    pub fn shutdown_handle(&self) -> DispatcherShutdown {
+        self.dispatcher.shutdown_handle()
+    }
+
+    /// Validates and dispatches one raw webhook body.
+    pub async fn handle(&self, provided_secret: Option<&str>, body: &[u8]) -> WebhookOutcome {
+        if body.len() > self.max_body_size {
+            return WebhookOutcome::PayloadTooLarge;
+        }
+        if !self.secret_matches(provided_secret) {
+            warn!("MAX webhook secret validation failed");
+            return WebhookOutcome::Unauthorized;
+        }
+
+        let update = match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(update) if update.is_object() => update,
+            Ok(_) => return WebhookOutcome::BadRequest,
+            Err(error) => {
+                warn!("Invalid MAX webhook JSON: {error}");
+                return WebhookOutcome::BadRequest;
+            }
+        };
+        let Ok(_permit) = self.in_flight.try_acquire() else {
+            return WebhookOutcome::Busy;
+        };
+
+        match tokio::time::timeout(self.dispatch_timeout, self.dispatcher.dispatch_raw(update))
+            .await
+        {
+            Ok(Ok(())) => WebhookOutcome::Accepted,
+            Ok(Err(error)) => {
+                error!("MAX webhook handler failed: {error}");
+                WebhookOutcome::HandlerFailed
+            }
+            Err(_) => {
+                warn!("MAX webhook dispatch timed out");
+                WebhookOutcome::DispatchTimedOut
+            }
+        }
+    }
+
+    fn secret_matches(&self, provided_secret: Option<&str>) -> bool {
+        match (self.secret_digest, provided_secret) {
+            (None, _) => true,
+            (Some(expected), Some(provided)) => {
+                let provided: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
+                bool::from(expected.ct_eq(&provided))
+            }
+            (Some(_), None) => false,
+        }
     }
 }
 
-// ────────────────────────────────────────────────
-// Internal state + handler
-// ────────────────────────────────────────────────
-
-struct WebhookState {
-    dispatcher: Arc<Dispatcher>,
-    secret: Option<String>,
+fn validate_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') || path.contains('?') || path.contains('#') {
+        return Err(MaxError::Configuration(
+            "webhook path must be an absolute path without a query or fragment".into(),
+        ));
+    }
+    Ok(())
 }
 
-async fn handle_update(
-    State(state): State<Arc<WebhookState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    // 1. Verify the optional secret header.
-    if let Some(expected) = &state.secret {
-        let provided = headers
-            .get("x-max-bot-api-secret")
-            .and_then(|v| v.to_str().ok());
-
-        match provided {
-            Some(val) if val == expected => {}
-            Some(val) => {
-                warn!("Webhook secret mismatch (got '{val}')");
-                return StatusCode::UNAUTHORIZED;
-            }
-            None => {
-                warn!("Missing X-Max-Bot-Api-Secret header");
-                return StatusCode::UNAUTHORIZED;
-            }
-        }
-    }
-
-    // 2. Parse the single update object as raw JSON first so unknown future
-    //    update types can still be observed by raw handlers.
-    let update: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(u) => u,
-        Err(e) => {
-            error!("Failed to parse webhook update: {e}");
-            // Return 200 so Max doesn't retry a malformed payload forever.
-            return StatusCode::OK;
-        }
+/// Axum adapter for [`WebhookService`].
+#[cfg(feature = "webhook-axum")]
+pub mod axum_adapter {
+    use axum::{
+        Router,
+        body::Bytes,
+        extract::{DefaultBodyLimit, State},
+        http::{HeaderMap, StatusCode},
+        routing::post,
     };
 
-    // 3. Dispatch — must not block longer than 30 s (Max's timeout).
-    state.dispatcher.dispatch_raw(update).await;
+    use super::{Result, SECRET_HEADER, WebhookService, validate_path};
 
-    StatusCode::OK
+    /// Builds a ready-to-merge Axum router for one webhook path.
+    pub fn router(service: WebhookService, path: &str) -> Result<Router> {
+        validate_path(path)?;
+        let body_limit = service.body_limit();
+        Ok(Router::new()
+            .route(path, post(handle))
+            .layer(DefaultBodyLimit::max(body_limit))
+            .with_state(service))
+    }
+
+    async fn handle(
+        State(service): State<WebhookService>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
+        let secret = headers
+            .get(SECRET_HEADER)
+            .and_then(|value| value.to_str().ok());
+        StatusCode::from_u16(service.handle(secret, &body).await.status_code())
+            .expect("webhook outcomes always contain valid HTTP status codes")
+    }
+}
+
+/// Actix Web adapter for [`WebhookService`].
+#[cfg(feature = "webhook-actix")]
+pub mod actix_adapter {
+    use actix_web::{
+        HttpRequest, HttpResponse, Scope,
+        web::{self, Bytes},
+    };
+
+    use super::{Result, SECRET_HEADER, WebhookService, validate_path};
+
+    /// Builds a ready-to-register Actix scope for one webhook path.
+    pub fn scope(service: WebhookService, path: &str) -> Result<Scope> {
+        validate_path(path)?;
+        let body_limit = service.body_limit();
+        Ok(web::scope(path)
+            .app_data(web::Data::new(service))
+            .app_data(web::PayloadConfig::new(body_limit))
+            .route("", web::post().to(handle)))
+    }
+
+    async fn handle(
+        service: web::Data<WebhookService>,
+        request: HttpRequest,
+        body: Bytes,
+    ) -> HttpResponse {
+        let secret = request
+            .headers()
+            .get(SECRET_HEADER)
+            .and_then(|value| value.to_str().ok());
+        let status = service.handle(secret, &body).await.status_code();
+        HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(status)
+                .expect("webhook outcomes always contain valid HTTP status codes"),
+        )
+        .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WebhookOutcome, WebhookService};
+    use crate::{Bot, Dispatcher};
+
+    fn test_service() -> WebhookService {
+        WebhookService::new(Dispatcher::new(Bot::new("token").unwrap()))
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_secret_before_json_parsing() {
+        let service = test_service().secret("correct").unwrap();
+        assert_eq!(
+            service.handle(Some("wrong"), b"not json").await,
+            WebhookOutcome::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_and_non_object_payloads() {
+        let service = test_service().max_body_size(2).unwrap();
+        assert_eq!(service.handle(None, b"{}").await, WebhookOutcome::Accepted);
+        assert_eq!(
+            service.handle(None, b"{  }").await,
+            WebhookOutcome::PayloadTooLarge
+        );
+        let service = test_service();
+        assert_eq!(
+            service.handle(None, b"[]").await,
+            WebhookOutcome::BadRequest
+        );
+    }
 }

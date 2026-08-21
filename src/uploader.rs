@@ -18,7 +18,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let bot = Bot::from_env();
+//!     let bot = Bot::from_env().expect("valid MAX_BOT_TOKEN");
 //!
 //!     // Upload an image from disk
 //!     let token = bot
@@ -36,18 +36,142 @@
 //! }
 //! ```
 
-use reqwest::multipart;
-use std::time::Duration;
-use tokio::time::sleep;
+use futures_util::StreamExt;
+use reqwest::{Body, StatusCode, header, multipart};
+use std::{
+    fmt,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::io::AsyncReadExt;
+use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::debug;
 
 use crate::{
     bot::Bot,
-    errors::{MaxError, Result},
+    errors::{ApiError, MaxError, Result, ValidationError},
     types::{Message, NewAttachment, NewMessageBody, UploadEndpoint, UploadResponse, UploadType},
 };
 
-const ATTACHMENT_READY_RETRY_DELAYS_MS: [u64; 5] = [500, 1_000, 2_000, 4_000, 8_000];
+const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Progress reported while streaming a file to MAX.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UploadProgress {
+    /// Number of bytes successfully uploaded so far.
+    pub uploaded: u64,
+    /// Total file size in bytes.
+    pub total: u64,
+    /// Completion percentage in the inclusive range `0.0..=100.0`.
+    pub percent: f64,
+}
+
+type ProgressCallback = Arc<dyn Fn(UploadProgress) + Send + Sync>;
+
+/// Controls timeout, chunking, retry, progress, and cancellation for an upload.
+#[derive(Clone)]
+pub struct UploadOptions {
+    /// Optional timeout applied to each upload request.
+    pub timeout: Option<Duration>,
+    /// Number of file bytes sent in each resumable chunk.
+    pub chunk_size: usize,
+    /// Maximum attempts for one resumable chunk.
+    pub max_chunk_attempts: u32,
+    /// Initial exponential-backoff delay between chunk retries.
+    pub initial_retry_delay: Duration,
+    /// Optional token used to cancel an in-progress upload.
+    pub cancellation_token: Option<CancellationToken>,
+    progress: Option<ProgressCallback>,
+}
+
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            max_chunk_attempts: 3,
+            initial_retry_delay: Duration::from_millis(250),
+            cancellation_token: None,
+            progress: None,
+        }
+    }
+}
+
+impl fmt::Debug for UploadOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UploadOptions")
+            .field("timeout", &self.timeout)
+            .field("chunk_size", &self.chunk_size)
+            .field("max_chunk_attempts", &self.max_chunk_attempts)
+            .field("initial_retry_delay", &self.initial_retry_delay)
+            .field("has_cancellation_token", &self.cancellation_token.is_some())
+            .field("has_progress_callback", &self.progress.is_some())
+            .finish()
+    }
+}
+
+impl UploadOptions {
+    /// Sets the timeout applied to each upload request.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the resumable chunk size in bytes.
+    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Sets the token used to cancel the upload.
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+
+    /// Registers a callback invoked after upload progress changes.
+    pub fn with_progress(
+        mut self,
+        callback: impl Fn(UploadProgress) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Some(Arc::new(callback));
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.chunk_size == 0 || self.chunk_size > MAX_CHUNK_SIZE {
+            return Err(ValidationError::new(
+                "chunk_size",
+                format!("must be between 1 and {MAX_CHUNK_SIZE} bytes"),
+            )
+            .into());
+        }
+        if self.max_chunk_attempts == 0 {
+            return Err(ValidationError::new("max_chunk_attempts", "must be at least 1").into());
+        }
+        Ok(())
+    }
+
+    fn report(&self, uploaded: u64, total: u64) {
+        if let Some(callback) = &self.progress {
+            callback(UploadProgress {
+                uploaded: uploaded.min(total),
+                total,
+                percent: if total == 0 {
+                    100.0
+                } else {
+                    uploaded.min(total) as f64 / total as f64 * 100.0
+                },
+            });
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum UploadRecipient {
@@ -87,10 +211,7 @@ fn token_from_upload_response(
                 }
             };
 
-            MaxError::Api {
-                code: 0,
-                message: message.into(),
-            }
+            MaxError::InvalidResponse(message.into())
         })
 }
 
@@ -123,11 +244,66 @@ fn attachment_from_upload_response(
     Ok(attachment)
 }
 
-fn is_attachment_not_processed_error(error: &MaxError) -> bool {
-    matches!(
-        error,
-        MaxError::Api { message, .. } if message.contains(".not.processed")
-    )
+fn validate_upload_filename(filename: &str) -> Result<()> {
+    if filename.is_empty() {
+        return Err(ValidationError::new("filename", "value is empty").into());
+    }
+    if filename
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+    {
+        return Err(ValidationError::new(
+            "filename",
+            "must not contain control characters, quotes, or backslashes",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn upload_api_error(status: StatusCode, body: String) -> ApiError {
+    let value = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let code = value
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+    let message = value
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+        .unwrap_or_else(|| {
+            status
+                .canonical_reason()
+                .unwrap_or("MAX upload failed")
+                .to_string()
+        });
+
+    ApiError::new(status.as_u16(), code, message).with_raw_response(body)
+}
+
+fn is_retryable_upload_error(error: &MaxError) -> bool {
+    match error {
+        MaxError::Http(_) => true,
+        MaxError::Api(error) => error.is_rate_limited() || error.is_server_error(),
+        _ => false,
+    }
+}
+
+async fn sleep_or_cancel(
+    delay: Duration,
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<()> {
+    if let Some(token) = cancellation_token {
+        tokio::select! {
+            _ = token.cancelled() => Err(MaxError::Cancelled),
+            _ = tokio::time::sleep(delay) => Ok(()),
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+        Ok(())
+    }
 }
 
 impl Bot {
@@ -151,25 +327,35 @@ impl Bot {
     pub async fn upload_file(
         &self,
         upload_type: UploadType,
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         filename: impl Into<String>,
         mime: impl Into<String>,
     ) -> Result<String> {
-        // Step 1 — request the upload URL.
+        self.upload_file_with_options(upload_type, path, filename, mime, UploadOptions::default())
+            .await
+    }
+
+    /// Streams a file with explicit progress, cancellation, timeout, and chunk controls.
+    pub async fn upload_file_with_options(
+        &self,
+        upload_type: UploadType,
+        path: impl AsRef<Path>,
+        filename: impl Into<String>,
+        mime: impl Into<String>,
+        options: UploadOptions,
+    ) -> Result<String> {
+        options.validate()?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        debug!("Upload URL: {}", endpoint.url);
-
-        // Step 2 — POST the file as multipart.
-        let bytes = tokio::fs::read(path).await.map_err(|e| MaxError::Api {
-            code: 0,
-            message: format!("Failed to read file: {e}"),
-        })?;
-
-        let token = self
-            .upload_bytes_to_url(&endpoint, bytes, filename.into(), mime.into(), upload_type)
+        let response = self
+            .upload_file_to_url_body(
+                &endpoint,
+                path.as_ref(),
+                filename.into(),
+                mime.into(),
+                &options,
+            )
             .await?;
-
-        Ok(token)
+        token_from_upload_response(&endpoint, &response, upload_type)
     }
 
     /// Like `upload_file`, but accepts raw bytes instead of a file path.
@@ -181,7 +367,6 @@ impl Bot {
         mime: impl Into<String>,
     ) -> Result<String> {
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        debug!("Upload URL: {}", endpoint.url);
         self.upload_bytes_to_url(&endpoint, bytes, filename.into(), mime.into(), upload_type)
             .await
     }
@@ -510,6 +695,181 @@ impl Bot {
     // Internal
     // ────────────────────────────────────────────────
 
+    async fn upload_file_to_url_body(
+        &self,
+        endpoint: &UploadEndpoint,
+        path: &Path,
+        filename: String,
+        mime: String,
+        options: &UploadOptions,
+    ) -> Result<String> {
+        let metadata = tokio::fs::metadata(path).await?;
+        if !metadata.is_file() {
+            return Err(ValidationError::new("path", "value does not point to a file").into());
+        }
+        if metadata.len() == 0 {
+            return Err(ValidationError::new("path", "file is empty").into());
+        }
+        validate_upload_filename(&filename)?;
+
+        if endpoint.token.is_some() {
+            self.upload_file_by_ranges(endpoint, path, &filename, metadata.len(), options)
+                .await?;
+            Ok(String::new())
+        } else {
+            self.upload_file_multipart(endpoint, path, filename, mime, metadata.len(), options)
+                .await
+        }
+    }
+
+    async fn upload_file_multipart(
+        &self,
+        endpoint: &UploadEndpoint,
+        path: &Path,
+        filename: String,
+        mime: String,
+        total: u64,
+        options: &UploadOptions,
+    ) -> Result<String> {
+        let file = tokio::fs::File::open(path).await?;
+        let uploaded = Arc::new(AtomicU64::new(0));
+        let progress = options.progress.clone();
+        let stream = ReaderStream::new(file).map(move |result| {
+            if let (Ok(bytes), Some(callback)) = (&result, &progress) {
+                let uploaded =
+                    uploaded.fetch_add(bytes.len() as u64, Ordering::Relaxed) + bytes.len() as u64;
+                callback(UploadProgress {
+                    uploaded: uploaded.min(total),
+                    total,
+                    percent: uploaded.min(total) as f64 / total as f64 * 100.0,
+                });
+            }
+            result
+        });
+        let part = multipart::Part::stream_with_length(Body::wrap_stream(stream), total)
+            .file_name(filename)
+            .mime_str(&mime)
+            .map_err(|error| ValidationError::new("mime", error.to_string()))?;
+        let form = multipart::Form::new().part("data", part);
+        let request = self
+            .api_client()
+            .await?
+            .post(&endpoint.url)
+            .timeout(options.timeout.unwrap_or_else(|| self.upload_timeout()))
+            .multipart(form);
+        let response =
+            Self::send_upload_request(request, options.cancellation_token.as_ref()).await?;
+        Self::parse_upload_response(response).await
+    }
+
+    async fn upload_file_by_ranges(
+        &self,
+        endpoint: &UploadEndpoint,
+        path: &Path,
+        filename: &str,
+        total: u64,
+        options: &UploadOptions,
+    ) -> Result<()> {
+        let mut file = tokio::fs::File::open(path).await?;
+        let mut offset = 0_u64;
+        let client = self.api_client().await?;
+        let timeout = options.timeout.unwrap_or_else(|| self.upload_timeout());
+
+        while offset < total {
+            if options
+                .cancellation_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(MaxError::Cancelled);
+            }
+
+            let bytes_to_read = (total - offset).min(options.chunk_size as u64) as usize;
+            let mut chunk = vec![0; bytes_to_read];
+            file.read_exact(&mut chunk).await?;
+            let end = offset + chunk.len() as u64 - 1;
+            let mut last_error = None;
+
+            for attempt in 0..options.max_chunk_attempts {
+                let request = client
+                    .post(&endpoint.url)
+                    .timeout(timeout)
+                    .header(
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{filename}\""),
+                    )
+                    .header(
+                        header::CONTENT_RANGE,
+                        format!("bytes {offset}-{end}/{total}"),
+                    )
+                    .header(
+                        header::CONTENT_TYPE,
+                        "application/x-binary; charset=x-user-defined",
+                    )
+                    .header("X-File-Name", filename)
+                    .header("X-Uploading-Mode", "parallel")
+                    .body(chunk.clone());
+                let result =
+                    Self::send_upload_request(request, options.cancellation_token.as_ref()).await;
+                let result = match result {
+                    Ok(response) => Self::parse_upload_response(response).await.map(|_| ()),
+                    Err(error) => Err(error),
+                };
+
+                match result {
+                    Ok(()) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error)
+                        if attempt + 1 < options.max_chunk_attempts
+                            && is_retryable_upload_error(&error) =>
+                    {
+                        last_error = Some(error);
+                        let delay = options
+                            .initial_retry_delay
+                            .saturating_mul(1 << attempt.min(16));
+                        sleep_or_cancel(delay, options.cancellation_token.as_ref()).await?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            if let Some(error) = last_error {
+                return Err(error);
+            }
+            offset = end + 1;
+            options.report(offset, total);
+        }
+
+        Ok(())
+    }
+
+    async fn send_upload_request(
+        request: reqwest::RequestBuilder,
+        cancellation_token: Option<&CancellationToken>,
+    ) -> Result<reqwest::Response> {
+        if let Some(token) = cancellation_token {
+            tokio::select! {
+                _ = token.cancelled() => Err(MaxError::Cancelled),
+                response = request.send() => Ok(response?),
+            }
+        } else {
+            Ok(request.send().await?)
+        }
+    }
+
+    async fn parse_upload_response(response: reqwest::Response) -> Result<String> {
+        let status = response.status();
+        let body = response.text().await?;
+        debug!(status = status.as_u16(), "MAX upload response");
+        if status.is_success() {
+            Ok(body)
+        } else {
+            Err(upload_api_error(status, body).into())
+        }
+    }
+
     async fn upload_bytes_to_url(
         &self,
         endpoint: &UploadEndpoint,
@@ -548,10 +908,7 @@ impl Bot {
         let part = multipart::Part::bytes(bytes)
             .file_name(filename)
             .mime_str(&mime)
-            .map_err(|e| MaxError::Api {
-                code: 0,
-                message: format!("Invalid MIME type: {e}"),
-            })?;
+            .map_err(|error| ValidationError::new("mime", error.to_string()))?;
 
         let form = multipart::Form::new().part("data", part);
 
@@ -559,50 +916,34 @@ impl Bot {
             .api_client()
             .await?
             .post(&endpoint.url)
+            .timeout(self.upload_timeout())
             .multipart(form)
             .send()
             .await?;
-
-        let status = resp.status();
-        let body = resp.text().await?;
-        debug!("Upload response {status}: {body}");
-
-        if !status.is_success() {
-            return Err(MaxError::Api {
-                code: status.as_u16(),
-                message: body,
-            });
-        }
-
-        Ok(body)
+        Self::parse_upload_response(resp).await
     }
 
     async fn upload_file_and_send(
         &self,
         recipient: UploadRecipient,
         upload_type: UploadType,
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         filename: impl Into<String>,
         mime: impl Into<String>,
         text: Option<String>,
     ) -> Result<Message> {
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        debug!("Upload URL: {}", endpoint.url);
 
-        let bytes = tokio::fs::read(path).await.map_err(|e| MaxError::Api {
-            code: 0,
-            message: format!("Failed to read file: {e}"),
-        })?;
-
-        let attachment = self
-            .upload_bytes_to_url_as_attachment(
+        let response = self
+            .upload_file_to_url_body(
                 &endpoint,
-                bytes,
+                path.as_ref(),
                 filename.into(),
                 mime.into(),
-                upload_type,
+                &UploadOptions::default(),
             )
             .await?;
+        let attachment = attachment_from_upload_response(&endpoint, &response, upload_type)?;
 
         self.send_uploaded_attachment(recipient, attachment, text)
             .await
@@ -618,7 +959,6 @@ impl Bot {
         text: Option<String>,
     ) -> Result<Message> {
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        debug!("Upload URL: {}", endpoint.url);
 
         let attachment = self
             .upload_bytes_to_url_as_attachment(
@@ -640,50 +980,21 @@ impl Bot {
         attachment: NewAttachment,
         text: Option<String>,
     ) -> Result<Message> {
-        for (attempt, retry_delay_ms) in std::iter::once(0)
-            .chain(ATTACHMENT_READY_RETRY_DELAYS_MS)
-            .enumerate()
-        {
-            if retry_delay_ms > 0 {
-                sleep(Duration::from_millis(retry_delay_ms)).await;
-            }
-
-            let body = NewMessageBody::text_opt(text.clone()).with_attachment(attachment.clone());
-
-            let result = match recipient {
-                UploadRecipient::Chat(chat_id) => self.send_message_to_chat(chat_id, body).await,
-                UploadRecipient::User(user_id) => self.send_message_to_user(user_id, body).await,
-            };
-
-            match result {
-                Ok(message) => return Ok(message),
-                Err(error)
-                    if is_attachment_not_processed_error(&error)
-                        && attempt < ATTACHMENT_READY_RETRY_DELAYS_MS.len() =>
-                {
-                    debug!(
-                        "Uploaded attachment is not processed yet; retrying send in {} ms",
-                        ATTACHMENT_READY_RETRY_DELAYS_MS[attempt]
-                    );
-                }
-                Err(error) => return Err(error),
-            }
+        let body = NewMessageBody::text_opt(text).with_attachment(attachment);
+        match recipient {
+            UploadRecipient::Chat(chat_id) => self.send_message_to_chat(chat_id, body).await,
+            UploadRecipient::User(user_id) => self.send_message_to_user(user_id, body).await,
         }
-
-        unreachable!("uploaded attachment retry loop always returns on the final attempt")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_from_upload_response, is_attachment_not_processed_error,
-        token_from_upload_response,
+        MAX_CHUNK_SIZE, UploadOptions, attachment_from_upload_response, token_from_upload_response,
+        validate_upload_filename,
     };
-    use crate::{
-        errors::MaxError,
-        types::{NewAttachment, UploadEndpoint, UploadType},
-    };
+    use crate::types::{NewAttachment, UploadEndpoint, UploadType};
 
     fn endpoint(token: Option<&str>) -> UploadEndpoint {
         UploadEndpoint {
@@ -757,14 +1068,19 @@ mod tests {
     }
 
     #[test]
-    fn detects_attachment_processing_errors() {
-        assert!(is_attachment_not_processed_error(&MaxError::Api {
-            code: 400,
-            message: "Key: errors.process.attachment.file.not.processed".into(),
-        }));
-        assert!(!is_attachment_not_processed_error(&MaxError::Api {
-            code: 400,
-            message: "permission.denied".into(),
-        }));
+    fn upload_options_reject_unbounded_chunks() {
+        assert!(UploadOptions::default().validate().is_ok());
+        assert!(
+            UploadOptions::default()
+                .with_chunk_size(MAX_CHUNK_SIZE + 1)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resumable_filename_rejects_header_injection() {
+        assert!(validate_upload_filename("video.mp4").is_ok());
+        assert!(validate_upload_filename("video.mp4\r\nX-Foo: bar").is_err());
     }
 }

@@ -1,41 +1,23 @@
-use reqwest::{Certificate, Client};
+use reqwest::{Certificate, Client, Method, Proxy};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::OnceCell;
-use tracing::{debug, warn};
+use tracing::debug;
+use url::Url;
 
-use crate::errors::{MaxError, Result};
+use crate::errors::{ApiError, MaxError, Result, ValidationError};
+use crate::rate_limit::{MessageOperation, RateLimitConfig, RateLimitKey, RateLimiters};
 use crate::types::*;
 
-const BASE_URL: &str = "https://platform-api2.max.ru";
+/// Default MAX Bot API endpoint.
+pub const DEFAULT_BASE_URL: &str = "https://platform-api2.max.ru";
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 30;
-const CA_FETCH_TIMEOUT_SECS: u64 = 10;
-const RUSSIAN_TRUSTED_ROOT_CA_URL: &str =
-    "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt";
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
 const RUSSIAN_TRUSTED_ROOT_CA_PEM: &[u8] = include_bytes!("certs/russian_trusted_root_ca.pem");
-
-fn default_client_builder() -> reqwest::ClientBuilder {
-    Client::builder().timeout(Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS))
-}
-
-fn certificates_from_bytes(bytes: &[u8]) -> std::result::Result<Vec<Certificate>, reqwest::Error> {
-    match Certificate::from_pem_bundle(bytes) {
-        Ok(certs) if !certs.is_empty() => Ok(certs),
-        Ok(_) | Err(_) => Certificate::from_der(bytes).map(|cert| vec![cert]),
-    }
-}
 
 fn embedded_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, reqwest::Error> {
     Certificate::from_pem_bundle(RUSSIAN_TRUSTED_ROOT_CA_PEM)
-}
-
-fn build_client_with_certs(certs: Vec<Certificate>) -> std::result::Result<Client, reqwest::Error> {
-    default_client_builder().tls_certs_merge(certs).build()
-}
-
-fn build_client_with_embedded_ca() -> std::result::Result<Client, reqwest::Error> {
-    build_client_with_certs(embedded_russian_trusted_root_ca()?)
 }
 
 /// Extension methods for building custom MAX-compatible `reqwest` clients.
@@ -54,54 +36,6 @@ pub trait RussianTlsExt {
 impl RussianTlsExt for reqwest::ClientBuilder {
     fn russian_tls(self) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error> {
         Ok(self.tls_certs_merge(embedded_russian_trusted_root_ca()?))
-    }
-}
-
-async fn download_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(CA_FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|err| format!("failed to build CA download client: {err}"))?;
-    let response = client
-        .get(RUSSIAN_TRUSTED_ROOT_CA_URL)
-        .send()
-        .await
-        .map_err(|err| format!("failed to download Russian Trusted Root CA: {err}"))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        return Err(format!(
-            "Russian Trusted Root CA download returned HTTP {status}"
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| format!("failed to read Russian Trusted Root CA body: {err}"))?;
-
-    certificates_from_bytes(&bytes)
-        .map_err(|err| format!("failed to parse Russian Trusted Root CA: {err}"))
-}
-
-async fn build_auto_client() -> Result<Client> {
-    match download_russian_trusted_root_ca().await {
-        Ok(certs) => match build_client_with_certs(certs) {
-            Ok(client) => {
-                debug!("Loaded Russian Trusted Root CA from {RUSSIAN_TRUSTED_ROOT_CA_URL}");
-                Ok(client)
-            }
-            Err(err) => {
-                warn!(
-                    "Failed to build client with downloaded Russian Trusted Root CA: {err}; using embedded fallback"
-                );
-                build_client_with_embedded_ca().map_err(MaxError::Http)
-            }
-        },
-        Err(err) => {
-            warn!("{err}; using embedded Russian Trusted Root CA fallback");
-            build_client_with_embedded_ca().map_err(MaxError::Http)
-        }
     }
 }
 
@@ -126,6 +60,246 @@ fn parse_success_payload<T: DeserializeOwned>(
     }
 }
 
+/// Retry policy for temporary MAX API and transport failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Total number of attempts, including the first request.
+    pub max_attempts: u32,
+    /// Delay before the first retry.
+    pub initial_delay: Duration,
+    /// Maximum exponential-backoff delay.
+    pub max_delay: Duration,
+}
+
+impl RetryPolicy {
+    /// Disables automatic retries.
+    pub const fn disabled() -> Self {
+        Self {
+            max_attempts: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        }
+    }
+
+    fn delay(self, retry_index: u32) -> Duration {
+        let multiplier = 1_u32.checked_shl(retry_index.min(31)).unwrap_or(u32::MAX);
+        self.initial_delay
+            .saturating_mul(multiplier)
+            .min(self.max_delay)
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Builder for a production MAX Bot API client.
+pub struct BotBuilder {
+    token: String,
+    base_url: String,
+    request_timeout: Duration,
+    connect_timeout: Duration,
+    upload_timeout: Duration,
+    proxy: Option<Proxy>,
+    proxy_disabled: bool,
+    client: Option<Client>,
+    rate_limits: RateLimitConfig,
+    retry_policy: RetryPolicy,
+}
+
+impl BotBuilder {
+    /// Creates a builder with secure TLS and documented MAX rate limits.
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            request_timeout: Duration::from_secs(DEFAULT_HTTP_TIMEOUT_SECS),
+            connect_timeout: Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS),
+            upload_timeout: Duration::from_secs(DEFAULT_UPLOAD_TIMEOUT_SECS),
+            proxy: None,
+            proxy_disabled: false,
+            client: None,
+            rate_limits: RateLimitConfig::default(),
+            retry_policy: RetryPolicy::default(),
+        }
+    }
+
+    /// Overrides the MAX API base URL, for example for a test server or gateway.
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    /// Sets the timeout for normal Bot API requests.
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Sets the TCP connection timeout.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Sets the timeout for each upload request or resumable chunk.
+    pub fn upload_timeout(mut self, timeout: Duration) -> Self {
+        self.upload_timeout = timeout;
+        self
+    }
+
+    /// Routes all requests through a configured reqwest proxy.
+    ///
+    /// Use the re-exported [`crate::reqwest::Proxy`] to configure credentials,
+    /// custom authorization, or destination exclusions before passing it here.
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxy = Some(proxy);
+        self.proxy_disabled = false;
+        self
+    }
+
+    /// Configures an HTTP, HTTPS, or feature-gated SOCKS proxy URL.
+    ///
+    /// For credentials or destination exclusions, construct a
+    /// [`crate::reqwest::Proxy`] and use [`Self::proxy`] instead.
+    pub fn proxy_url(mut self, proxy_url: &str) -> Result<Self> {
+        self.proxy = Some(Proxy::all(proxy_url)?);
+        self.proxy_disabled = false;
+        Ok(self)
+    }
+
+    /// Disables automatic system proxies and any previously configured proxy.
+    ///
+    /// This applies to every request made by the bot client, including uploads.
+    /// A later call to [`Self::proxy`] or [`Self::proxy_url`] replaces this setting.
+    ///
+    /// ```
+    /// # fn main() -> maxoxide::Result<()> {
+    /// let bot = maxoxide::Bot::builder("token")
+    ///     .no_proxy()
+    ///     .build()?;
+    /// # let _ = bot;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn no_proxy(mut self) -> Self {
+        self.proxy = None;
+        self.proxy_disabled = true;
+        self
+    }
+
+    /// Uses a prebuilt HTTP client as-is.
+    ///
+    /// The custom client is responsible for TLS roots, proxies, and transport
+    /// timeouts. Request-level upload timeouts are still applied by maxoxide.
+    pub fn http_client(mut self, client: Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Configures global and recipient-specific limits.
+    pub fn rate_limits(mut self, rate_limits: RateLimitConfig) -> Self {
+        self.rate_limits = rate_limits;
+        self
+    }
+
+    /// Configures retries for temporary failures.
+    pub fn retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
+    /// Builds the bot client.
+    pub fn build(self) -> Result<Bot> {
+        if self.token.trim().is_empty() {
+            return Err(MaxError::Configuration("bot token is empty".into()));
+        }
+        reqwest::header::HeaderValue::from_str(&self.token).map_err(|error| {
+            MaxError::Configuration(format!(
+                "bot token cannot be used as an HTTP header: {error}"
+            ))
+        })?;
+        if self.request_timeout.is_zero()
+            || self.connect_timeout.is_zero()
+            || self.upload_timeout.is_zero()
+        {
+            return Err(MaxError::Configuration(
+                "request, connect, and upload timeouts must be greater than zero".into(),
+            ));
+        }
+        if self.retry_policy.max_attempts == 0 {
+            return Err(MaxError::Configuration(
+                "retry policy must allow at least one attempt".into(),
+            ));
+        }
+
+        let mut base_url = Url::parse(&self.base_url)
+            .map_err(|error| MaxError::Configuration(format!("invalid base URL: {error}")))?;
+        if !matches!(base_url.scheme(), "http" | "https") {
+            return Err(MaxError::Configuration(
+                "base URL must use http or https".into(),
+            ));
+        }
+        if base_url.scheme() == "http" && !base_url.host_str().is_some_and(is_loopback_host) {
+            return Err(MaxError::Configuration(
+                "base URL must use HTTPS unless it targets localhost".into(),
+            ));
+        }
+        if !base_url.username().is_empty()
+            || base_url.password().is_some()
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
+        {
+            return Err(MaxError::Configuration(
+                "base URL must not contain credentials, a query, or a fragment".into(),
+            ));
+        }
+        if !base_url.path().ends_with('/') {
+            let path = format!("{}/", base_url.path());
+            base_url.set_path(&path);
+        }
+
+        if self.client.is_some() && (self.proxy.is_some() || self.proxy_disabled) {
+            return Err(MaxError::Configuration(
+                "proxy configuration cannot be combined with a prebuilt HTTP client".into(),
+            ));
+        }
+
+        let client = match self.client {
+            Some(client) => client,
+            None => {
+                let mut builder = Client::builder()
+                    .timeout(self.request_timeout)
+                    .connect_timeout(self.connect_timeout)
+                    .russian_tls()?;
+                if self.proxy_disabled {
+                    builder = builder.no_proxy();
+                } else if let Some(proxy) = self.proxy {
+                    builder = builder.proxy(proxy);
+                }
+                builder.build()?
+            }
+        };
+
+        Ok(Bot {
+            inner: Arc::new(BotInner {
+                token: self.token,
+                client,
+                base_url,
+                upload_timeout: self.upload_timeout,
+                rate_limiters: RateLimiters::new(self.rate_limits),
+                retry_policy: self.retry_policy,
+            }),
+        })
+    }
+}
+
 /// The main entry point for the Max Bot API.
 ///
 /// Holds an HTTP client and your bot token. All API methods are async and
@@ -136,10 +310,11 @@ fn parse_success_payload<T: DeserializeOwned>(
 /// use maxoxide::Bot;
 ///
 /// #[tokio::main]
-/// async fn main() {
-///     let bot = Bot::from_env();
-///     let me = bot.get_me().await.unwrap();
+/// async fn main() -> maxoxide::Result<()> {
+///     let bot = Bot::from_env()?;
+///     let me = bot.get_me().await?;
 ///     println!("Running as @{}", me.username.unwrap_or_default());
+///     Ok(())
 /// }
 /// ```
 #[derive(Clone)]
@@ -150,7 +325,10 @@ pub struct Bot {
 struct BotInner {
     token: String,
     client: Client,
-    auto_client: Option<OnceCell<Client>>,
+    base_url: Url,
+    upload_timeout: Duration,
+    rate_limiters: RateLimiters,
+    retry_policy: RetryPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +349,13 @@ impl MessageRecipientQuery {
         let mut params = Vec::with_capacity(1);
         self.append_to(&mut params);
         params
+    }
+
+    fn rate_limit_key(self) -> RateLimitKey {
+        match self {
+            Self::ChatId(chat_id) => RateLimitKey::Chat(chat_id),
+            Self::UserId(user_id) => RateLimitKey::User(user_id),
+        }
     }
 }
 
@@ -211,6 +396,25 @@ fn comma_join_i64(values: impl IntoIterator<Item = i64>) -> String {
         .map(|value| value.to_string())
         .collect::<Vec<String>>()
         .join(",")
+}
+
+fn split_message_text(text: &str, max_chars: usize) -> Vec<String> {
+    debug_assert!(max_chars > 0);
+    let mut chars = text.chars();
+    let mut parts = Vec::new();
+
+    loop {
+        let part = chars.by_ref().take(max_chars).collect::<String>();
+        if part.is_empty() {
+            break;
+        }
+        parts.push(part);
+    }
+
+    if parts.is_empty() {
+        parts.push(String::new());
+    }
+    parts
 }
 
 fn percent_encode_path_segment(value: &str) -> String {
@@ -293,49 +497,38 @@ fn chat_link_candidates(chat_link: &str) -> Vec<String> {
     candidates
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
 impl Bot {
-    /// Create a new bot with the given token.
-    pub fn new(token: impl Into<String>) -> Self {
-        let client = build_client_with_embedded_ca().expect("Failed to build HTTP client");
-
-        Bot {
-            inner: Arc::new(BotInner {
-                token: token.into(),
-                client,
-                auto_client: Some(OnceCell::new()),
-            }),
-        }
+    /// Creates a new bot with secure defaults and documented MAX rate limits.
+    pub fn new(token: impl Into<String>) -> Result<Self> {
+        Self::builder(token).build()
     }
 
-    /// Create a new bot with a custom HTTP client.
-    ///
-    /// The provided client is used as-is. Automatic Russian Trusted Root CA
-    /// refresh is only applied to clients created by [`Bot::new`] and
-    /// [`Bot::from_env`].
-    pub fn with_client(token: impl Into<String>, client: Client) -> Self {
-        Bot {
-            inner: Arc::new(BotInner {
-                token: token.into(),
-                client,
-                auto_client: None,
-            }),
-        }
+    /// Starts configuring a bot client.
+    pub fn builder(token: impl Into<String>) -> BotBuilder {
+        BotBuilder::new(token)
     }
 
-    /// Create a bot reading the token from the `MAX_BOT_TOKEN` environment variable.
+    /// Creates a bot with a custom HTTP client.
     ///
-    /// # Panics
-    /// Panics if the environment variable is not set.
-    pub fn from_env() -> Self {
-        let token =
-            std::env::var("MAX_BOT_TOKEN").expect("MAX_BOT_TOKEN environment variable is not set");
+    /// The provided client is used as-is and must contain any required custom
+    /// trust roots or proxy configuration.
+    pub fn with_client(token: impl Into<String>, client: Client) -> Result<Self> {
+        Self::builder(token).http_client(client).build()
+    }
+
+    /// Creates a bot using `MAX_BOT_TOKEN` from the environment.
+    pub fn from_env() -> Result<Self> {
+        let token = std::env::var("MAX_BOT_TOKEN").map_err(|error| {
+            MaxError::Configuration(format!("MAX_BOT_TOKEN is not available: {error}"))
+        })?;
         Self::new(token)
     }
 
-    /// Returns a reference to the initially built raw HTTP client.
-    ///
-    /// For bots created by [`Bot::new`] or [`Bot::from_env`], API methods may
-    /// use an internally refreshed client after automatic CA loading succeeds.
+    /// Returns the underlying HTTP client.
     pub fn client(&self) -> &Client {
         &self.inner.client
     }
@@ -345,12 +538,36 @@ impl Bot {
         &self.inner.token
     }
 
+    /// Returns the configured Bot API base URL.
+    pub fn base_url(&self) -> &Url {
+        &self.inner.base_url
+    }
+
+    /// Executes an arbitrary relative MAX Bot API request.
+    ///
+    /// This escape hatch uses the configured authorization, rate limiter,
+    /// structured errors, and retry policy. Prefer typed methods when one is
+    /// available.
+    pub async fn execute<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        self.request(method, path, query, body).await
+    }
+
     // ────────────────────────────────────────────────
     // Internal helpers
     // ────────────────────────────────────────────────
 
     fn url(&self, path: &str) -> String {
-        format!("{BASE_URL}{path}")
+        self.inner
+            .base_url
+            .join(path.trim_start_matches('/'))
+            .expect("validated base URL accepts relative API paths")
+            .to_string()
     }
 
     fn auth(&self) -> String {
@@ -358,14 +575,22 @@ impl Bot {
     }
 
     pub(crate) async fn api_client(&self) -> Result<&Client> {
-        match &self.inner.auto_client {
-            Some(auto_client) => {
-                auto_client
-                    .get_or_try_init(|| async { build_auto_client().await })
-                    .await
-            }
-            None => Ok(&self.inner.client),
-        }
+        Ok(&self.inner.client)
+    }
+
+    pub(crate) fn upload_timeout(&self) -> Duration {
+        self.inner.upload_timeout
+    }
+
+    pub(crate) async fn acquire_message_limit(
+        &self,
+        operation: MessageOperation,
+        key: RateLimitKey,
+    ) {
+        self.inner
+            .rate_limiters
+            .acquire_recipient(operation, key)
+            .await;
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -377,18 +602,7 @@ impl Bot {
         T: DeserializeOwned,
         Q: serde::Serialize,
     {
-        debug!("GET {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .get(url)
-            .header("Authorization", auth)
-            .query(&query)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request(Method::GET, path, &query, None).await
     }
 
     async fn post<T: DeserializeOwned, B: serde::Serialize>(
@@ -406,19 +620,13 @@ impl Bot {
         B: serde::Serialize,
         Q: serde::Serialize,
     {
-        debug!("POST {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .post(url)
-            .header("Authorization", auth)
-            .query(&query)
-            .json(body)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request(
+            Method::POST,
+            path,
+            &query,
+            Some(serde_json::to_value(body)?),
+        )
+        .await
     }
 
     async fn put<T: DeserializeOwned, B: serde::Serialize>(
@@ -426,18 +634,13 @@ impl Bot {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        debug!("PUT {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .put(url)
-            .header("Authorization", auth)
-            .json(body)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request::<T, _>(
+            Method::PUT,
+            path,
+            &[] as &[(&str, &str)],
+            Some(serde_json::to_value(body)?),
+        )
+        .await
     }
 
     async fn patch<T: DeserializeOwned, B: serde::Serialize>(
@@ -445,18 +648,13 @@ impl Bot {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        debug!("PATCH {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .patch(url)
-            .header("Authorization", auth)
-            .json(body)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request::<T, _>(
+            Method::PATCH,
+            path,
+            &[] as &[(&str, &str)],
+            Some(serde_json::to_value(body)?),
+        )
+        .await
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -469,44 +667,126 @@ impl Bot {
         T: DeserializeOwned,
         Q: serde::Serialize,
     {
-        debug!("DELETE {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .delete(url)
-            .header("Authorization", auth)
-            .query(&query)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request(Method::DELETE, path, &query, None).await
     }
 
-    async fn parse<T: DeserializeOwned>(&self, resp: reqwest::Response) -> Result<T> {
+    async fn request<T, Q>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &Q,
+        body: Option<serde_json::Value>,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+        Q: serde::Serialize + ?Sized,
+    {
+        if path.contains("://") || path.starts_with("//") {
+            return Err(MaxError::Configuration(
+                "Bot API paths must be relative to the configured base URL".into(),
+            ));
+        }
+
+        let attempts = self.inner.retry_policy.max_attempts.max(1);
+        for attempt in 0..attempts {
+            self.inner.rate_limiters.acquire_global().await;
+            debug!(method = %method, path, attempt = attempt + 1, "MAX API request");
+
+            let mut request = self
+                .api_client()
+                .await?
+                .request(method.clone(), self.url(path))
+                .header("Authorization", self.auth())
+                .query(query);
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+
+            let result = match request.send().await {
+                Ok(response) => Self::parse_response(response).await,
+                Err(error) => Err(MaxError::Http(error)),
+            };
+
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error)
+                    if attempt + 1 < attempts && Self::is_retryable(&method, path, &error) =>
+                {
+                    let delay = error
+                        .api_error()
+                        .and_then(|error| error.retry_after)
+                        .unwrap_or_else(|| self.inner.retry_policy.delay(attempt))
+                        .min(self.inner.retry_policy.max_delay);
+                    debug!(method = %method, path, ?delay, "retrying temporary MAX API failure");
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("request loop always returns on its final attempt")
+    }
+
+    fn is_retryable(method: &Method, path: &str, error: &MaxError) -> bool {
+        match error {
+            MaxError::Api(error) if error.is_attachment_not_ready() => {
+                method == Method::POST && path == "/messages"
+            }
+            MaxError::Api(error) if error.is_rate_limited() => true,
+            MaxError::Api(error) if error.is_server_error() => method != Method::POST,
+            MaxError::Http(_) => method != Method::POST,
+            _ => false,
+        }
+    }
+
+    async fn parse_response<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs);
         let bytes = resp.bytes().await?;
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        debug!("Response {status}: {text}");
+        debug!(status = status.as_u16(), "MAX API response");
 
         if status.is_success() {
             parse_success_payload(&text).map_err(MaxError::Json)
         } else {
-            // Try to extract an error message from the JSON body.
-            let message = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("message")
-                        .or_else(|| v.get("error"))
-                        .and_then(|m| m.as_str())
-                        .map(String::from)
+            let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let code = value
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+            let message = value
+                .as_ref()
+                .and_then(|value| {
+                    value
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| value.get("error").and_then(serde_json::Value::as_str))
+                        .or_else(|| {
+                            value
+                                .get("error")
+                                .and_then(|error| error.get("message"))
+                                .and_then(serde_json::Value::as_str)
+                        })
                 })
-                .unwrap_or_else(|| text.clone());
+                .filter(|message| !message.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    status
+                        .canonical_reason()
+                        .unwrap_or("MAX API request failed")
+                        .to_string()
+                });
 
-            Err(MaxError::Api {
-                code: status.as_u16(),
-                message,
-            })
+            Err(ApiError::new(status.as_u16(), code, message)
+                .with_raw_response(text)
+                .with_retry_after(retry_after)
+                .into())
         }
     }
 
@@ -515,13 +795,8 @@ impl Bot {
     // ────────────────────────────────────────────────
 
     /// GET /me — Returns info about the current bot.
-    pub async fn get_me(&self) -> Result<User> {
+    pub async fn get_me(&self) -> Result<BotInfo> {
         self.get("/me").await
-    }
-
-    /// PATCH /me — Edit the current bot's profile, commands, or avatar.
-    pub async fn edit_my_info(&self, body: EditMyInfoBody) -> Result<User> {
-        self.patch("/me", &body).await
     }
 
     // ────────────────────────────────────────────────
@@ -543,6 +818,9 @@ impl Bot {
         body: NewMessageBody,
         options: SendMessageOptions,
     ) -> Result<Message> {
+        body.validate()?;
+        self.acquire_message_limit(MessageOperation::Send, recipient.rate_limit_key())
+            .await;
         let mut params = recipient.into_query();
         append_send_options(&mut params, options);
         self.post_with_query("/messages", &body, &params).await
@@ -650,25 +928,106 @@ impl Bot {
         .await
     }
 
+    /// Convenience: send an HTML-formatted message to a chat/dialog.
+    pub async fn send_html_to_chat(
+        &self,
+        chat_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_chat(
+            chat_id,
+            NewMessageBody::text(text).with_format(MessageFormat::Html),
+        )
+        .await
+    }
+
+    /// Convenience: send an HTML-formatted message to a user.
+    pub async fn send_html_to_user(
+        &self,
+        user_id: i64,
+        text: impl Into<String>,
+    ) -> Result<Message> {
+        self.send_message_to_user(
+            user_id,
+            NewMessageBody::text(text).with_format(MessageFormat::Html),
+        )
+        .await
+    }
+
+    /// Splits text at MAX's 4000-character boundary and sends every part.
+    pub async fn send_long_text_to_chat(
+        &self,
+        chat_id: i64,
+        text: impl AsRef<str>,
+    ) -> Result<Vec<Message>> {
+        self.send_long_text(MessageRecipientQuery::ChatId(chat_id), text.as_ref(), None)
+            .await
+    }
+
+    /// Splits formatted text at MAX's 4000-character boundary and sends every part.
+    pub async fn send_long_formatted_text_to_chat(
+        &self,
+        chat_id: i64,
+        text: impl AsRef<str>,
+        format: MessageFormat,
+    ) -> Result<Vec<Message>> {
+        self.send_long_text(
+            MessageRecipientQuery::ChatId(chat_id),
+            text.as_ref(),
+            Some(format),
+        )
+        .await
+    }
+
+    async fn send_long_text(
+        &self,
+        recipient: MessageRecipientQuery,
+        text: &str,
+        format: Option<MessageFormat>,
+    ) -> Result<Vec<Message>> {
+        let mut messages = Vec::new();
+        for part in split_message_text(text, 4000) {
+            let mut body = NewMessageBody::text(part);
+            body.format = format.clone();
+            messages.push(self.send_message_to_recipient(recipient, body).await?);
+        }
+        Ok(messages)
+    }
+
     /// PUT /messages — Edit an existing message.
     pub async fn edit_message(
         &self,
         message_id: &str,
         body: NewMessageBody,
     ) -> Result<SimpleResult> {
+        body.validate()?;
+        self.acquire_message_limit(
+            MessageOperation::Edit,
+            RateLimitKey::Custom(message_id.to_owned()),
+        )
+        .await;
         self.put_with_query("/messages", &body, [("message_id", message_id)])
             .await
     }
 
     /// DELETE /messages — Delete a message.
     pub async fn delete_message(&self, message_id: &str) -> Result<SimpleResult> {
+        self.acquire_message_limit(
+            MessageOperation::Delete,
+            RateLimitKey::Custom(message_id.to_owned()),
+        )
+        .await;
         self.delete_with_query("/messages", [("message_id", message_id)])
             .await
     }
 
     /// GET /messages/{messageId} — Get a single message by ID.
     pub async fn get_message(&self, message_id: &str) -> Result<Message> {
-        self.get(&format!("/messages/{message_id}")).await
+        self.get(&format!(
+            "/messages/{}",
+            percent_encode_path_segment(message_id)
+        ))
+        .await
     }
 
     /// GET /messages — Get messages from a chat.
@@ -729,6 +1088,14 @@ impl Bot {
             notification: Option<String>,
         }
 
+        if let Some(message) = &body.message {
+            message.validate()?;
+        }
+        self.acquire_message_limit(
+            MessageOperation::Callback,
+            RateLimitKey::Custom(body.callback_id.clone()),
+        )
+        .await;
         self.post_with_query(
             "/answers",
             &AnswerBody {
@@ -741,30 +1108,138 @@ impl Bot {
     }
 
     // ────────────────────────────────────────────────
-    // Chats
+    // Comments (currently marked unavailable by MAX)
     // ────────────────────────────────────────────────
 
-    /// GET /chats — Get all group chats the bot is a member of.
+    /// GET /messages/{messageId}/comments — Get comments for a channel post.
     ///
-    /// Deprecated by MAX: since June 2026 this endpoint is no longer
-    /// supported, and MAX announced it will be disabled in August 2026. Store
-    /// `chat_id` values from updates such as `bot_added`, `bot_started`, and
-    /// message events in your own storage, then use [`Bot::get_chat`] and other
-    /// chat-id-based methods.
-    #[deprecated(
-        since = "2.3.0",
-        note = "MAX stopped supporting GET /chats. Store chat_id values from updates and use chat-id-based methods instead."
-    )]
-    pub async fn get_chats(&self, count: Option<u32>, marker: Option<i64>) -> Result<ChatList> {
-        let mut params: Vec<(&str, String)> = vec![];
-        if let Some(c) = count {
-            params.push(("count", c.to_string()));
+    /// MAX currently documents this API as temporarily unavailable. The typed
+    /// method is provided so applications can prepare and mock the contract.
+    pub async fn get_comments(
+        &self,
+        message_id: &str,
+        options: GetCommentsOptions,
+    ) -> Result<CommentList> {
+        if options
+            .count
+            .is_some_and(|count| !(1..=100).contains(&count))
+        {
+            return Err(ValidationError::new("count", "must be between 1 and 100").into());
         }
-        if let Some(m) = marker {
-            params.push(("marker", m.to_string()));
+        if options.before.is_some_and(|timestamp| timestamp < 0)
+            || options.after.is_some_and(|timestamp| timestamp < 0)
+        {
+            return Err(ValidationError::new("timestamp", "must not be negative").into());
         }
-        self.get_with_query("/chats", &params).await
+
+        let mut query = Vec::new();
+        if let Some(comment_ids) = options.comment_ids {
+            if comment_ids.iter().any(String::is_empty) {
+                return Err(ValidationError::new("comment_ids", "IDs must not be empty").into());
+            }
+            query.push(("comment_ids", comment_ids.join(",")));
+        }
+        if let Some(before) = options.before {
+            query.push(("before", before.to_string()));
+        }
+        if let Some(after) = options.after {
+            query.push(("after", after.to_string()));
+        }
+        if let Some(count) = options.count {
+            query.push(("count", count.to_string()));
+        }
+
+        self.get_with_query(
+            &format!(
+                "/messages/{}/comments",
+                percent_encode_path_segment(message_id)
+            ),
+            &query,
+        )
+        .await
     }
+
+    /// GET /messages/{messageId}/comments/{commentId} — Get one comment.
+    pub async fn get_comment(&self, message_id: &str, comment_id: &str) -> Result<CommentMessage> {
+        self.get(&format!(
+            "/messages/{}/comments/{}",
+            percent_encode_path_segment(message_id),
+            percent_encode_path_segment(comment_id)
+        ))
+        .await
+    }
+
+    /// POST /messages/{messageId}/comments — Add a comment to a channel post.
+    pub async fn create_comment(
+        &self,
+        message_id: &str,
+        body: NewCommentBody,
+        disable_link_preview: Option<bool>,
+    ) -> Result<CommentMessage> {
+        body.validate()?;
+        self.acquire_message_limit(
+            MessageOperation::Comment,
+            RateLimitKey::Custom(message_id.to_owned()),
+        )
+        .await;
+        let query = disable_link_preview
+            .map(|value| vec![("disable_link_preview", value.to_string())])
+            .unwrap_or_default();
+        self.post_with_query(
+            &format!(
+                "/messages/{}/comments",
+                percent_encode_path_segment(message_id)
+            ),
+            &body,
+            &query,
+        )
+        .await
+    }
+
+    /// PUT /messages/{messageId}/comments — Edit a comment.
+    pub async fn edit_comment(
+        &self,
+        message_id: &str,
+        comment_id: &str,
+        body: NewCommentBody,
+    ) -> Result<SimpleResult> {
+        body.validate()?;
+        self.acquire_message_limit(
+            MessageOperation::Comment,
+            RateLimitKey::Custom(message_id.to_owned()),
+        )
+        .await;
+        self.put_with_query(
+            &format!(
+                "/messages/{}/comments",
+                percent_encode_path_segment(message_id)
+            ),
+            &body,
+            [("comment_id", comment_id)],
+        )
+        .await
+    }
+
+    /// DELETE /messages/{messageId}/comments — Delete a comment.
+    pub async fn delete_comment(&self, message_id: &str, comment_id: &str) -> Result<SimpleResult> {
+        self.acquire_message_limit(
+            MessageOperation::Comment,
+            RateLimitKey::Custom(message_id.to_owned()),
+        )
+        .await;
+        self.delete_with_query(
+            &format!(
+                "/messages/{}/comments",
+                percent_encode_path_segment(message_id)
+            ),
+            [("comment_id", comment_id)],
+        )
+        .await
+    }
+
+    // ────────────────────────────────────────────────
+    // Chats
+    // ────────────────────────────────────────────────
 
     /// GET /chats/{chatId} — Get info about a specific chat.
     pub async fn get_chat(&self, chat_id: i64) -> Result<Chat> {
@@ -779,10 +1254,7 @@ impl Bot {
     pub async fn get_chat_by_link(&self, chat_link: &str) -> Result<Chat> {
         let candidates = chat_link_candidates(chat_link);
         if candidates.is_empty() {
-            return Err(MaxError::Api {
-                code: 0,
-                message: "chat_link is empty".into(),
-            });
+            return Err(ValidationError::new("chat_link", "value is empty").into());
         }
 
         let tried = candidates.join(", ");
@@ -793,7 +1265,8 @@ impl Bot {
             match self.get(&format!("/chats/{encoded}")).await {
                 Ok(chat) => return Ok(chat),
                 Err(err) => {
-                    let should_try_next = matches!(err, MaxError::Api { code: 404, .. });
+                    let should_try_next =
+                        matches!(err, MaxError::Api(ref error) if error.status == 404);
                     if !should_try_next {
                         return Err(err);
                     }
@@ -803,15 +1276,14 @@ impl Bot {
         }
 
         match last_error {
-            Some(MaxError::Api { code: 404, message }) => Err(MaxError::Api {
-                code: 404,
-                message: format!("{message}. Tried variants: {tried}"),
-            }),
+            Some(MaxError::Api(error)) if error.status == 404 => Err(ApiError::new(
+                404,
+                error.code,
+                format!("{}. Tried variants: {tried}", error.message),
+            )
+            .into()),
             Some(err) => Err(err),
-            None => Err(MaxError::Api {
-                code: 0,
-                message: "chat_link is empty".into(),
-            }),
+            None => Err(ValidationError::new("chat_link", "value is empty").into()),
         }
     }
 
@@ -1107,20 +1579,21 @@ impl Bot {
     // Bot commands
     // ────────────────────────────────────────────────
 
-    /// Attempt to set the list of commands shown to users.
-    ///
-    /// The public MAX REST docs expose bot commands in `GET /me`, but do not
-    /// currently document a write endpoint for updating that menu.
-    /// Live requests to `POST /me/commands` currently return
-    /// `404 Path /me/commands is not recognized`.
-    ///
-    /// This helper is kept for experimentation and future MAX support.
-    pub async fn set_my_commands(&self, commands: Vec<BotCommand>) -> Result<SimpleResult> {
+    /// PATCH /me/commands — Replace the list of commands shown to users.
+    pub async fn set_my_commands(&self, commands: Vec<BotCommand>) -> Result<BotCommands> {
+        if commands.len() > 32 {
+            return Err(
+                ValidationError::new("commands", "must not contain more than 32 items").into(),
+            );
+        }
+        if commands.iter().any(|command| command.name.is_empty()) {
+            return Err(ValidationError::new("commands.name", "value is empty").into());
+        }
         #[derive(serde::Serialize)]
         struct CommandsBody {
             commands: Vec<BotCommand>,
         }
-        self.post("/me/commands", &CommandsBody { commands }).await
+        self.patch("/me/commands", &CommandsBody { commands }).await
     }
 
     // ────────────────────────────────────────────────
@@ -1133,19 +1606,8 @@ impl Bot {
         B: serde::Serialize,
         Q: serde::Serialize,
     {
-        debug!("PUT {path}");
-        let url = self.url(path);
-        let auth = self.auth();
-        let resp = self
-            .api_client()
-            .await?
-            .put(url)
-            .header("Authorization", auth)
-            .query(&query)
-            .json(body)
-            .send()
-            .await?;
-        self.parse(resp).await
+        self.request(Method::PUT, path, &query, Some(serde_json::to_value(body)?))
+            .await
     }
 }
 
@@ -1165,7 +1627,7 @@ mod tests {
 
     #[test]
     fn bot_uses_platform_api_v2_by_default() {
-        let bot = super::Bot::new("token");
+        let bot = super::Bot::new("token").unwrap();
 
         assert_eq!(bot.url("/me"), "https://platform-api2.max.ru/me");
     }

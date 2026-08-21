@@ -1,8 +1,22 @@
-//! Demonstrates composable Dispatcher filters, startup hooks, raw update hooks,
-//! and scheduled tasks.
+//! # English
 //!
-//! Run:
-//!   MAX_BOT_TOKEN=your_token cargo run --example dispatcher_filters_bot
+//! A routing showcase for a bot that needs different behavior for text, media,
+//! files, regex matches, and unknown updates. It also demonstrates a startup
+//! hook, inspection of raw updates, and a health check every five minutes. Use
+//! these patterns when one large `on_message` handler has become difficult to
+//! maintain and routing should be split into focused handlers.
+//!
+//! Run: `MAX_BOT_TOKEN=... cargo run --example dispatcher_filters_bot`.
+//!
+//! # Русский
+//!
+//! Демонстрация роутинга для бота, который должен по-разному обрабатывать текст,
+//! media, файлы, regex-совпадения и неизвестные updates. Также показаны startup
+//! hook, просмотр raw updates и health check каждые пять минут. Используйте эти
+//! шаблоны, когда один большой `on_message` стал неудобным и логику пора разделить
+//! на небольшие специализированные handlers.
+//!
+//! Запуск: `MAX_BOT_TOKEN=... cargo run --example dispatcher_filters_bot`.
 
 use std::time::Duration;
 
@@ -13,9 +27,11 @@ use maxoxide::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
-    let bot = Bot::from_env();
+    let bot = Bot::from_env().expect("MAX_BOT_TOKEN must contain a valid bot token");
     let mut dp = Dispatcher::new(bot);
 
     dp.on_start(|ctx: StartContext| async move {
@@ -99,6 +115,6 @@ async fn main() -> Result<()> {
         Ok(())
     });
 
-    dp.start_polling().await;
+    dp.start_polling().await?;
     Ok(())
 }

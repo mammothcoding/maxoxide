@@ -10,10 +10,10 @@
 //! use maxoxide::types::Update;
 //!
 //! #[tokio::main]
-//! async fn main() {
+//! async fn main() -> maxoxide::Result<()> {
 //!     tracing_subscriber::fmt::init();
 //!
-//!     let bot = Bot::from_env(); // reads MAX_BOT_TOKEN
+//!     let bot = Bot::from_env().expect("valid MAX_BOT_TOKEN");
 //!     let mut dp = Dispatcher::new(bot);
 //!
 //!     // Echo every message back.
@@ -25,7 +25,7 @@
 //!         Ok(())
 //!     });
 //!
-//!     dp.start_polling().await;
+//!     dp.start_polling().await
 //! }
 //! ```
 //!
@@ -61,22 +61,32 @@
 //! # }
 //! ```
 
+/// MAX Bot API client and client configuration.
 pub mod bot;
+#[cfg(feature = "digital-id")]
+pub mod digital_id;
+/// Update dispatcher, filters, middleware, and polling support.
 pub mod dispatcher;
+/// Error types returned by the crate.
 pub mod errors;
+pub mod miniapp;
+mod rate_limit;
+/// Serializable MAX Bot API request and response models.
 pub mod types;
 pub mod uploader;
 
-#[cfg(feature = "webhook")]
+#[cfg(any(feature = "webhook-axum", feature = "webhook-actix"))]
 pub mod webhook;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export the most commonly used items at the crate root.
-pub use bot::{Bot, RussianTlsExt};
+pub use bot::{Bot, BotBuilder, DEFAULT_BASE_URL, RetryPolicy, RussianTlsExt};
 pub use dispatcher::{
-    Context, Dispatcher, Filter, RawUpdateContext, ScheduledTaskContext, StartContext,
+    Context, Dispatcher, DispatcherShutdown, Filter, Next, RawUpdateContext, ScheduledTaskContext,
+    StartContext,
 };
-pub use errors::{MaxError, Result};
+pub use errors::{ApiError, MaxError, Result, ValidationError};
+pub use rate_limit::{RateLimitConfig, RateLimitKey};
 pub use reqwest;

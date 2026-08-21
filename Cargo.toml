@@ -1,60 +1,85 @@
 [package]
 name = "maxoxide"
-version = "2.3.0"
+version = "3.0.0"
+authors = ["Mammoth <dev@mtcoding.com>"]
 edition = "2024"
-description = "Async Rust library for the Max messenger Bot API"
+rust-version = "1.85"
+description = "Production-ready async Rust SDK for the MAX messenger Bot API"
 license = "MIT"
 repository = "https://github.com/mammothcoding/maxoxide"
+homepage = "https://github.com/mammothcoding/maxoxide"
+documentation = "https://docs.rs/maxoxide"
+readme = "README.md"
 keywords = ["max", "messenger", "bot", "api", "async"]
+categories = ["api-bindings", "asynchronous", "network-programming", "web-programming"]
 
 [features]
 default = []
-# Enable the axum-based webhook server
-webhook = ["dep:axum", "dep:tower", "dep:http-body-util", "dep:bytes"]
+webhook-axum = ["dep:axum"]
+webhook-actix = ["dep:actix-web"]
+digital-id = []
+socks-proxy = ["reqwest/socks"]
 
 [dependencies]
-reqwest = { version = "0.13", features = ["json", "multipart", "query"] }
+reqwest = { version = "0.13", features = ["json", "multipart", "query", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+futures-util = "0.3"
 thiserror = "2"
 tracing = "0.1"
-async-trait = "0.1"
 regex = "1"
 hmac = "0.12"
 sha2 = "0.10"
+subtle = "2"
+url = "2"
 
-# Optional webhook deps (feature = "webhook")
-axum           = { version = "0.8", optional = true }
-tower          = { version = "0.5", optional = true }
-http-body-util = { version = "0.1", optional = true }
-bytes          = { version = "1", optional = true }
+# Optional webhook adapters.
+axum = { version = "0.8", optional = true }
+actix-web = { version = "4.11", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = "0.3"
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [[example]]
 name = "echo_bot"
 path = "examples/echo_bot.rs"
 
 [[example]]
-name = "keyboard_bot"
-path = "examples/keyboard_bot.rs"
-
-[[example]]
 name = "dispatcher_filters_bot"
 path = "examples/dispatcher_filters_bot.rs"
-
-[[example]]
-name = "media_bot"
-path = "examples/media_bot.rs"
 
 [[example]]
 name = "live_api_test"
 path = "examples/live_api_test.rs"
 
 [[example]]
-name = "webhook_bot"
-path = "examples/webhook_bot.rs"
-required-features = ["webhook"]
+name = "webhook_axum_integration"
+path = "examples/webhook_axum_integration.rs"
+required-features = ["webhook-axum"]
+
+[[example]]
+name = "webhook_actix"
+path = "examples/webhook_actix.rs"
+required-features = ["webhook-actix"]
+
+[[example]]
+name = "webhook_actix_integration"
+path = "examples/webhook_actix_integration.rs"
+required-features = ["webhook-actix"]
+
+[[example]]
+name = "digital_id"
+path = "examples/digital_id.rs"
+required-features = ["digital-id"]
