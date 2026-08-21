@@ -1,4 +1,4 @@
-# maxoxide
+# ![MAX logo](./max_logo.png "MAX logo") maxoxide
 
 [![CI](https://github.com/mammothcoding/maxoxide/actions/workflows/rust.yml/badge.svg)](https://github.com/mammothcoding/maxoxide/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/maxoxide.svg)](https://crates.io/crates/maxoxide)
