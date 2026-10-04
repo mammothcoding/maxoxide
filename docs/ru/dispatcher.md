@@ -19,7 +19,7 @@ dispatcher.on_update(
 );
 ```
 
-Встроены фильтры сообщений, edits, callback и точного callback payload, lifecycle бота/пользователя/чата, constructed-message events, exact/contains/regex text, chat/sender IDs, типов attachments, unknown updates, AND, OR, NOT и custom predicates.
+Встроены фильтры сообщений, изменений, комментариев, callback и точного callback payload, жизненного цикла бота, пользователя и чата, смены прав администратора бота, constructed-message events, точного текста, подстроки и регулярного выражения, ID чата и отправителя, типов вложений, неизвестных updates, AND, OR, NOT и пользовательских предикатов. Для новых событий используйте `on_comment_created`, `on_comment_edited`, `on_comment_removed` и `on_bot_admin_permissions_changed`.
 
 Создание regex может завершиться ошибкой и возвращает локальный `ValidationError`, а не искусственную API error.
 

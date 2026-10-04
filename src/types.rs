@@ -941,7 +941,7 @@ pub struct CommentLinkedMessage {
     pub message: Option<CommentMessageBody>,
 }
 
-/// Page returned by the experimental comments API.
+/// Page returned by the comments API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommentList {
     /// Comments in the current page.
@@ -2295,6 +2295,33 @@ pub enum Update {
         /// Global identifier of the user associated with removal.
         user_id: i64,
     },
+    /// В канале был создан комментарий.
+    CommentCreated {
+        /// Время события, переданное MAX.
+        timestamp: i64,
+        /// Созданный комментарий в общей wire-модели сообщения.
+        message: Message,
+    },
+    /// В канале был изменён комментарий.
+    CommentEdited {
+        /// Время события, переданное MAX.
+        timestamp: i64,
+        /// Изменённый комментарий в общей wire-модели сообщения.
+        message: Message,
+    },
+    /// Из канала был удалён комментарий.
+    CommentRemoved {
+        /// Время события, переданное MAX.
+        timestamp: i64,
+        /// Идентификатор удалённого комментария.
+        message_id: String,
+        /// Идентификатор канала, из которого удалён комментарий.
+        chat_id: i64,
+        /// Идентификатор пользователя, удалившего комментарий.
+        user_id: i64,
+        /// Идентификатор поста, к которому относился комментарий.
+        post_id: String,
+    },
     /// A user pressed an inline button.
     MessageCallback {
         /// Event timestamp supplied by MAX.
@@ -2366,6 +2393,23 @@ pub enum Update {
         user: User,
         /// Whether the target chat is a channel.
         is_channel: Option<bool>,
+    },
+    /// Изменились права бота-администратора в чате или канале.
+    BotAdminPermissionsChanged {
+        /// Время события, переданное MAX.
+        timestamp: i64,
+        /// Идентификатор чата или канала.
+        chat_id: i64,
+        /// Идентификатор пользователя или бота, изменившего права.
+        user_id: i64,
+        /// Идентификатор бота, права которого изменились.
+        bot_id: i64,
+        /// Произошло ли изменение в канале.
+        is_channel: bool,
+        /// Является ли бот администратором после изменения.
+        is_admin: bool,
+        /// Текущий набор прав, если MAX передал его в событии.
+        permissions: Option<Vec<ChatAdminPermission>>,
     },
     /// A user stopped the bot in a private dialog.
     BotStopped {
@@ -2493,12 +2537,16 @@ impl Update {
             | Self::MessageEdited { timestamp, .. }
             | Self::MessageEditedMissing { timestamp }
             | Self::MessageRemoved { timestamp, .. }
+            | Self::CommentCreated { timestamp, .. }
+            | Self::CommentEdited { timestamp, .. }
+            | Self::CommentRemoved { timestamp, .. }
             | Self::MessageCallback { timestamp, .. }
             | Self::MessageConstructionRequest { timestamp, .. }
             | Self::MessageConstructed { timestamp, .. }
             | Self::BotStarted { timestamp, .. }
             | Self::BotAdded { timestamp, .. }
             | Self::BotRemoved { timestamp, .. }
+            | Self::BotAdminPermissionsChanged { timestamp, .. }
             | Self::BotStopped { timestamp, .. }
             | Self::DialogCleared { timestamp, .. }
             | Self::DialogMuted { timestamp, .. }
@@ -2524,15 +2572,18 @@ impl Update {
     /// message updates, and remove them on `bot_removed` when appropriate.
     pub fn chat_id(&self) -> Option<i64> {
         match self {
-            Self::MessageCreated { message, .. } | Self::MessageEdited { message, .. } => {
-                Some(message.chat_id())
-            }
+            Self::MessageCreated { message, .. }
+            | Self::MessageEdited { message, .. }
+            | Self::CommentCreated { message, .. }
+            | Self::CommentEdited { message, .. } => Some(message.chat_id()),
             Self::MessageEditedMissing { .. } => None,
             Self::MessageConstructionRequest { .. } | Self::MessageConstructed { .. } => None,
             Self::MessageRemoved { chat_id, .. }
+            | Self::CommentRemoved { chat_id, .. }
             | Self::BotStarted { chat_id, .. }
             | Self::BotAdded { chat_id, .. }
             | Self::BotRemoved { chat_id, .. }
+            | Self::BotAdminPermissionsChanged { chat_id, .. }
             | Self::BotStopped { chat_id, .. }
             | Self::DialogCleared { chat_id, .. }
             | Self::DialogMuted { chat_id, .. }
@@ -2554,12 +2605,16 @@ impl Update {
             Self::MessageEdited { .. } => Some("message_edited"),
             Self::MessageEditedMissing { .. } => Some("message_edited"),
             Self::MessageRemoved { .. } => Some("message_removed"),
+            Self::CommentCreated { .. } => Some("comment_created"),
+            Self::CommentEdited { .. } => Some("comment_edited"),
+            Self::CommentRemoved { .. } => Some("comment_removed"),
             Self::MessageCallback { .. } => Some("message_callback"),
             Self::MessageConstructionRequest { .. } => Some("message_construction_request"),
             Self::MessageConstructed { .. } => Some("message_constructed"),
             Self::BotStarted { .. } => Some("bot_started"),
             Self::BotAdded { .. } => Some("bot_added"),
             Self::BotRemoved { .. } => Some("bot_removed"),
+            Self::BotAdminPermissionsChanged { .. } => Some("bot_admin_permissions_changed"),
             Self::BotStopped { .. } => Some("bot_stopped"),
             Self::DialogCleared { .. } => Some("dialog_cleared"),
             Self::DialogMuted { .. } => Some("dialog_muted"),
@@ -2637,6 +2692,21 @@ impl<'de> Deserialize<'de> for Update {
         }
 
         #[derive(Deserialize)]
+        struct CommentUpdate {
+            timestamp: i64,
+            message: Message,
+        }
+
+        #[derive(Deserialize)]
+        struct CommentRemovedUpdate {
+            timestamp: i64,
+            message_id: String,
+            chat_id: i64,
+            user_id: i64,
+            post_id: String,
+        }
+
+        #[derive(Deserialize)]
         struct MessageCallbackUpdate {
             timestamp: i64,
             callback: Callback,
@@ -2684,6 +2754,18 @@ impl<'de> Deserialize<'de> for Update {
             user: User,
             #[serde(default)]
             is_channel: Option<bool>,
+        }
+
+        #[derive(Deserialize)]
+        struct BotAdminPermissionsChangedUpdate {
+            timestamp: i64,
+            chat_id: i64,
+            user_id: i64,
+            bot_id: i64,
+            is_channel: bool,
+            is_admin: bool,
+            #[serde(default)]
+            permissions: Option<Vec<ChatAdminPermission>>,
         }
 
         #[derive(Deserialize)]
@@ -2774,6 +2856,29 @@ impl<'de> Deserialize<'de> for Update {
                     }
                 })
             }
+            "comment_created" => parse_update!(CommentUpdate, |wire: CommentUpdate| {
+                Self::CommentCreated {
+                    timestamp: wire.timestamp,
+                    message: wire.message,
+                }
+            }),
+            "comment_edited" => parse_update!(CommentUpdate, |wire: CommentUpdate| {
+                Self::CommentEdited {
+                    timestamp: wire.timestamp,
+                    message: wire.message,
+                }
+            }),
+            "comment_removed" => {
+                parse_update!(CommentRemovedUpdate, |wire: CommentRemovedUpdate| {
+                    Self::CommentRemoved {
+                        timestamp: wire.timestamp,
+                        message_id: wire.message_id,
+                        chat_id: wire.chat_id,
+                        user_id: wire.user_id,
+                        post_id: wire.post_id,
+                    }
+                })
+            }
             "message_callback" => {
                 parse_update!(MessageCallbackUpdate, |wire: MessageCallbackUpdate| {
                     Self::MessageCallback {
@@ -2835,6 +2940,20 @@ impl<'de> Deserialize<'de> for Update {
                     is_channel: wire.is_channel,
                 }
             }),
+            "bot_admin_permissions_changed" => parse_update!(
+                BotAdminPermissionsChangedUpdate,
+                |wire: BotAdminPermissionsChangedUpdate| {
+                    Self::BotAdminPermissionsChanged {
+                        timestamp: wire.timestamp,
+                        chat_id: wire.chat_id,
+                        user_id: wire.user_id,
+                        bot_id: wire.bot_id,
+                        is_channel: wire.is_channel,
+                        is_admin: wire.is_admin,
+                        permissions: wire.permissions,
+                    }
+                }
+            ),
             "bot_stopped" => parse_update!(UserDialogUpdate, |wire: UserDialogUpdate| {
                 Self::BotStopped {
                     timestamp: wire.timestamp,
@@ -3000,14 +3119,14 @@ pub struct UploadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UploadType {
-    /// Still images (JPG, JPEG, PNG, GIF, TIFF, BMP, HEIC).
-    /// NOTE: `photo` was removed from the API — always use `image`.
+    /// Изображения до 50 MB (JPG, JPEG, PNG, GIF, TIFF, BMP, HEIC).
+    /// Значение `photo` удалено из API, используйте `image`.
     Image,
-    /// Video files (MP4, MOV, MKV, WEBM, MATROSKA).
+    /// Видео до 250 MB (MP4, MOV, MKV, WEBM, MATROSKA).
     Video,
-    /// Audio files (MP3, WAV, M4A, ...).
+    /// Аудио до 256 MB и 60 минут (MP3, WAV, M4A, ...).
     Audio,
-    /// Any other file type (max 4 GB).
+    /// Прочие типы файлов до 4 GB.
     File,
 }
 
@@ -3047,6 +3166,23 @@ pub struct AnswerCallbackBody {
     /// Short notification displayed to the user.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification: Option<String>,
+}
+
+/// Query-параметры для `POST /answers`.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct AnswerCallbackOptions {
+    /// Нужно ли запретить MAX создавать предпросмотр ссылок в обновлённом сообщении.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_link_preview: Option<bool>,
+}
+
+impl AnswerCallbackOptions {
+    /// Создаёт параметры с явно заданным поведением предпросмотра ссылок.
+    pub fn disable_link_preview(disable: bool) -> Self {
+        Self {
+            disable_link_preview: Some(disable),
+        }
+    }
 }
 
 // ────────────────────────────────────────────────

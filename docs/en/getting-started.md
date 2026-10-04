@@ -76,7 +76,7 @@ MAX allows at most 32 commands. maxoxide validates this locally.
 
 ## Update compatibility
 
-Known events deserialize to `Update` variants. This includes message construction requests/completions and the optional `bot_stopped.payload`. Unknown future events become `Update::Unknown` with their raw JSON retained. Unknown string enum values are likewise preserved where the model permits it.
+Known events deserialize to `Update` variants. This includes comment creation/edit/removal, bot administrator permission changes, message construction requests/completions, and the optional `bot_stopped.payload`. Unknown future events and malformed known payloads become `Update::Unknown` with their raw JSON retained. Unknown string enum values are likewise preserved where the model permits it.
 
 Use `get_updates_raw` or `Dispatcher::on_raw_update` when integrating a newly introduced MAX event before a typed maxoxide release.
 

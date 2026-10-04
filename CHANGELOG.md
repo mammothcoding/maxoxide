@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.1.0] - 2026-10-04
+
+### EN
+
+#### Release summary
+
+This compatible release aligns maxoxide with MAX OpenAPI 0.0.33, adds the latest comment and administrator webhook events, and rejects invalid uploads before network I/O.
+
+#### Added
+
+- Added typed `comment_created`, `comment_edited`, `comment_removed`, and `bot_admin_permissions_changed` updates with matching Dispatcher filters and handlers. Malformed known payloads still fall back to `Update::Unknown` with raw JSON preserved.
+- Added `AnswerCallbackOptions` and `Bot::answer_callback_with_options` for the `disable_link_preview` query parameter. The existing `answer_callback` method remains unchanged.
+
+#### Changed
+
+- Comments CRUD is treated as an active API, and `live_api_test` can run an optional read or confirmed create/edit/delete scenario for a supplied channel post.
+- File and byte upload helpers now reject empty content and enforce the decimal MAX limits before requesting an upload URL: image 50 MB, video 250 MB, audio 256 MB, and file 4 GB.
+- Bumped the crate version to `3.1.0`.
+
+#### Deprecated
+
+- Deprecated `Bot::add_members`. MAX restricted `POST /chats/{chatId}/members` on September 9, 2026 and removed it on September 30, 2026 without a Bot API replacement.
+
+### RU
+
+#### Кратко о релизе
+
+Совместимый релиз синхронизирует maxoxide с MAX OpenAPI 0.0.33, добавляет актуальные события комментариев и прав администратора, а также отклоняет некорректные загрузки до сетевого запроса.
+
+#### Добавлено
+
+- Добавлены типизированные updates `comment_created`, `comment_edited`, `comment_removed` и `bot_admin_permissions_changed` с соответствующими фильтрами и обработчиками Dispatcher. Некорректный известный payload по-прежнему преобразуется в `Update::Unknown` с сохранением исходного JSON.
+- Добавлены `AnswerCallbackOptions` и `Bot::answer_callback_with_options` для query-параметра `disable_link_preview`. Существующий метод `answer_callback` не изменён.
+
+#### Изменено
+
+- CRUD комментариев считается действующим API, а `live_api_test` может выполнить необязательное чтение либо подтверждаемое создание, изменение и удаление комментария для указанного поста канала.
+- Методы загрузки файлов и bytes теперь до запроса URL отклоняют пустое содержимое и проверяют десятичные лимиты MAX: изображение 50 MB, видео 250 MB, аудио 256 MB, файл 4 GB.
+- Версия крейта повышена до `3.1.0`.
+
+#### Устарело
+
+- Метод `Bot::add_members` помечен устаревшим. MAX ограничил `POST /chats/{chatId}/members` 9 сентября 2026 года и удалил его 30 сентября 2026 года без замены в Bot API.
+
 ## [3.0.0] - 2026-08-21
 
 ### EN

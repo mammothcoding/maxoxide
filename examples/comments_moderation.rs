@@ -1,21 +1,17 @@
 //! # English
 //!
 //! Shows the typed request used to read up to 50 comments for a channel post and
-//! iterate over their IDs and text. This is a preparation and mock-integration
-//! example for future moderation tools; MAX currently marks all comments endpoints
-//! temporarily unavailable, so a real request is expected to fail until the
-//! platform enables them. Do not build a production workflow that depends on it.
+//! iterate over their IDs and text. The bot must have access to the channel and the
+//! administrator permissions required by MAX.
 //!
 //! Requires `MAX_BOT_TOKEN` and the channel post ID in `MAX_POST_ID`.
 //! Run: `MAX_BOT_TOKEN=... MAX_POST_ID=... cargo run --example comments_moderation`.
 //!
 //! # Русский
 //!
-//! Показывает typed request для чтения до 50 комментариев к посту канала и обхода
-//! их ID и текста. Это подготовительный пример для mock-интеграции и будущих tools
-//! модерации: MAX сейчас помечает все endpoints комментариев временно недоступными,
-//! поэтому реальный запрос ожидаемо завершится ошибкой до включения API платформой.
-//! Не стройте production-процесс, зависящий от его доступности.
+//! Показывает типизированный запрос для чтения до 50 комментариев к посту канала и
+//! обхода их ID и текста. Боту нужны доступ к каналу и требуемые MAX права
+//! администратора.
 //!
 //! Нужны `MAX_BOT_TOKEN` и ID поста канала в `MAX_POST_ID`.
 //! Запуск: `MAX_BOT_TOKEN=... MAX_POST_ID=... cargo run --example comments_moderation`.

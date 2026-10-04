@@ -1,6 +1,18 @@
-# Migrating from maxoxide 2.x to 3.0
+# Migrating to maxoxide 3.x
 
 ## English
+
+### Updating from 3.0 to 3.1
+
+Version 3.1 is source-compatible with 3.0 for normal external use. `Update` remains `#[non_exhaustive]`, and the existing `Bot::answer_callback` signature is unchanged.
+
+- Handle `CommentCreated`, `CommentEdited`, `CommentRemoved`, and `BotAdminPermissionsChanged` when relevant. The administrator-permission event is delivered only by webhook.
+- Use `answer_callback_with_options` when `disable_link_preview` is needed for a replacement callback message.
+- Empty and oversized upload input now returns `MaxError::Validation` before `POST /uploads`.
+- Replace `Bot::add_members`: MAX restricted the endpoint on September 9, 2026 and removed it on September 30, 2026 without a Bot API replacement. The method remains temporarily available only as a deprecated compatibility signature.
+- Comments CRUD is active and no longer treated as an unavailable experimental contract.
+
+### Migrating from 2.x to 3.0
 
 Version 3.0 intentionally removes obsolete compatibility APIs and makes configuration failures explicit. MSRV is now Rust 1.85.
 
@@ -112,9 +124,21 @@ Create `WebhookService`, configure secret/limits once, then call `axum_adapter::
 
 - `miniapp`: strict init data and `requestContact()` verification.
 - `digital_id` behind `digital-id`: experimental partner client with separate credentials; validate the private onboarding contract before production use.
-- Comments are typed but remain experimental because MAX marks the endpoints temporarily unavailable.
+- Comments were introduced as an experimental contract in 3.0 and became active in 3.1.
 
 ## Русский
+
+### Обновление с 3.0 до 3.1
+
+Версия 3.1 сохраняет совместимость исходного кода с 3.0 при обычном внешнем использовании. `Update` остаётся `#[non_exhaustive]`, а сигнатура существующего `Bot::answer_callback` не изменилась.
+
+- При необходимости обрабатывайте `CommentCreated`, `CommentEdited`, `CommentRemoved` и `BotAdminPermissionsChanged`. Событие изменения прав администратора доставляется только через webhook.
+- Для `disable_link_preview` в заменяющем callback-сообщении используйте `answer_callback_with_options`.
+- Пустые и превышающие лимит данные загрузки теперь возвращают `MaxError::Validation` до `POST /uploads`.
+- Замените использование `Bot::add_members`: MAX ограничил endpoint 9 сентября 2026 года и удалил 30 сентября 2026 года без замены в Bot API. Метод временно сохранён только как устаревшая совместимая сигнатура.
+- CRUD комментариев действует и больше не считается недоступным экспериментальным контрактом.
+
+### Переход с 2.x на 3.0
 
 Версия 3.0 намеренно удаляет устаревшие compatibility APIs и делает ошибки конфигурации явными. MSRV повышен до Rust 1.85.
 
@@ -187,4 +211,4 @@ File helpers больше не читают файл целиком в `Vec<u8>`
 
 - `miniapp`: строгая проверка init data и `requestContact()`.
 - `digital_id` за feature `digital-id`: experimental partner client с независимыми credentials; перед production проверьте private onboarding contract.
-- Comments типизированы, но остаются experimental, пока MAX помечает endpoints временно недоступными.
+- В 3.0 комментарии появились как экспериментальный контракт, а в 3.1 стали действующим API.

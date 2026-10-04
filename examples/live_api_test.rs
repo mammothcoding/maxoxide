@@ -9,9 +9,9 @@
 //!
 //! The example asks before optional or destructive steps and restores captured
 //! command/webhook state where possible. `MAX_BOT_TOKEN` and `MAX_WEBHOOK_SECRET`
-//! take precedence; otherwise masked prompts are shown. Comments are reported as
-//! unavailable while MAX disables that API. The experimental Digital ID partner
-//! integration is outside this example's scope.
+//! take precedence; otherwise masked prompts are shown. Comment reads and a confirmed
+//! create/edit/delete probe are available for a supplied channel post. The experimental
+//! Digital ID partner integration is outside this example's scope.
 //! Full setup and safety guidance: `docs/en/live-api-test.md`.
 //!
 //! Run: `cargo run --example live_api_test`.
@@ -28,8 +28,9 @@
 //! Перед необязательными и необратимыми шагами пример запрашивает подтверждение, а
 //! сохранённые команды и webhook-подписки по возможности восстанавливаются.
 //! `MAX_BOT_TOKEN` и `MAX_WEBHOOK_SECRET` имеют приоритет; иначе секреты запрашиваются
-//! с маскированным вводом. Комментарии отмечаются недоступными, пока MAX отключает API.
-//! Экспериментальная партнёрская интеграция Digital ID не входит в сценарии примера.
+//! с маскированным вводом. Для указанного поста канала доступны чтение комментариев и
+//! подтверждаемая проверка создания, изменения и удаления. Экспериментальная партнёрская
+//! интеграция Digital ID не входит в сценарии примера.
 //! Полная инструкция по настройке и безопасности: `docs/ru/live-api-test.md`.
 //!
 //! Запуск: `cargo run --example live_api_test`.
@@ -37,16 +38,16 @@
 use inquire::{Password, PasswordDisplayMode};
 use maxoxide::types::{
     AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatAdmin, ChatAdminPermission,
-    ChatType, EditChatBody, KeyboardPayload, MarkupElement, Message, MessageFormat, NewAttachment,
-    NewMessageBody, PinMessageBody, RemoveMemberOptions, SendMessageOptions, SenderAction,
-    SubscribeBody, Subscription, Update, UploadType,
+    ChatType, EditChatBody, GetCommentsOptions, KeyboardPayload, MarkupElement, Message,
+    MessageFormat, NewAttachment, NewCommentBody, NewMessageBody, PinMessageBody,
+    SendMessageOptions, SenderAction, SubscribeBody, Subscription, Update, UploadType,
 };
 use maxoxide::{Bot, MaxError};
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -206,7 +207,7 @@ async fn main() -> AnyResult<()> {
         ),
     }
 
-    run_comments_phase(&mut report, lang);
+    run_comments_phase(&mut harness, &mut report, &config).await?;
 
     if let Some(channel_link) = config.channel_link.clone() {
         run_get_chat_by_link_probe(&mut harness, &mut report, &channel_link).await;
@@ -2553,23 +2554,172 @@ async fn run_commands_phase(
     Ok(())
 }
 
-fn run_comments_phase(report: &mut Report, lang: Language) {
+async fn run_comments_phase(
+    harness: &mut Harness,
+    report: &mut Report,
+    config: &Config,
+) -> AnyResult<()> {
+    let lang = config.lang;
     print_section(tr(lang, "Comments", "Комментарии"));
-    skip_cases(
-        report,
-        &[
-            "bot.get_comments",
-            "bot.get_comment",
-            "bot.create_comment",
-            "bot.edit_comment",
-            "bot.delete_comment",
-        ],
+    let Some(post_id) = config.comment_post_id.clone() else {
+        skip_cases(
+            report,
+            &[
+                "bot.get_comments",
+                "bot.get_comment",
+                "bot.create_comment",
+                "bot.edit_comment",
+                "bot.delete_comment",
+            ],
+            tr(
+                lang,
+                "tester did not provide a channel post ID",
+                "тестер не указал ID поста канала",
+            ),
+        );
+        return Ok(());
+    };
+
+    let comments = harness
+        .api_case(report, "bot.get_comments", {
+            let post_id = post_id.clone();
+            move |bot| async move {
+                bot.get_comments(
+                    &post_id,
+                    GetCommentsOptions {
+                        count: Some(50),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        })
+        .await;
+
+    let Some(comments) = comments else {
+        skip_cases(
+            report,
+            &[
+                "bot.get_comment",
+                "bot.create_comment",
+                "bot.edit_comment",
+                "bot.delete_comment",
+            ],
+            tr(
+                lang,
+                "comments list request did not succeed",
+                "запрос списка комментариев не завершился успешно",
+            ),
+        );
+        return Ok(());
+    };
+
+    if !confirm(
+        lang,
         tr(
             lang,
-            "MAX currently marks all documented comments endpoints as temporarily unavailable",
-            "MAX сейчас помечает все документированные endpoints комментариев как временно недоступные",
+            "Create, edit, and delete a temporary comment on this post? Type `y` to continue, anything else for read-only mode.",
+            "Создать, изменить и удалить временный комментарий к этому посту? Введите `y`, чтобы продолжить, иначе останется только чтение.",
         ),
-    );
+        false,
+    )? {
+        if let Some(comment_id) = comments
+            .messages
+            .first()
+            .map(|comment| comment.body.mid.clone())
+        {
+            let _ = harness
+                .api_case(report, "bot.get_comment", {
+                    let post_id = post_id.clone();
+                    move |bot| async move { bot.get_comment(&post_id, &comment_id).await }
+                })
+                .await;
+        } else {
+            report.skip(
+                "bot.get_comment",
+                tr(
+                    lang,
+                    "the post has no comments to read",
+                    "у поста нет комментариев для чтения",
+                ),
+            );
+        }
+        skip_cases(
+            report,
+            &[
+                "bot.create_comment",
+                "bot.edit_comment",
+                "bot.delete_comment",
+            ],
+            tr(
+                lang,
+                "tester selected read-only comments mode",
+                "тестер выбрал режим комментариев только для чтения",
+            ),
+        );
+        return Ok(());
+    }
+
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let created = harness
+        .api_case(report, "bot.create_comment", {
+            let post_id = post_id.clone();
+            move |bot| async move {
+                bot.create_comment(
+                    &post_id,
+                    NewCommentBody::text(format!("maxoxide live comment {suffix}")),
+                    Some(true),
+                )
+                .await
+            }
+        })
+        .await;
+
+    let Some(created) = created else {
+        skip_cases(
+            report,
+            &["bot.get_comment", "bot.edit_comment", "bot.delete_comment"],
+            tr(
+                lang,
+                "temporary comment was not created",
+                "временный комментарий не был создан",
+            ),
+        );
+        return Ok(());
+    };
+    let comment_id = created.body.mid;
+
+    let _ = harness
+        .api_case(report, "bot.get_comment", {
+            let post_id = post_id.clone();
+            let comment_id = comment_id.clone();
+            move |bot| async move { bot.get_comment(&post_id, &comment_id).await }
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.edit_comment", {
+            let post_id = post_id.clone();
+            let comment_id = comment_id.clone();
+            move |bot| async move {
+                bot.edit_comment(
+                    &post_id,
+                    &comment_id,
+                    NewCommentBody::text(format!("maxoxide edited live comment {suffix}")),
+                )
+                .await
+            }
+        })
+        .await;
+    let _ = harness
+        .api_case(report, "bot.delete_comment", move |bot| async move {
+            bot.delete_comment(&post_id, &comment_id).await
+        })
+        .await;
+
+    Ok(())
 }
 
 async fn run_group_phase(
@@ -2579,6 +2729,22 @@ async fn run_group_phase(
     known_user_id: Option<i64>,
 ) -> AnyResult<()> {
     let lang = config.lang;
+    report.skip(
+        "bot.add_members",
+        tr(
+            lang,
+            "MAX removed POST /chats/{chatId}/members on September 30, 2026",
+            "MAX удалил POST /chats/{chatId}/members 30 сентября 2026 года",
+        ),
+    );
+    report.skip(
+        "bot.remove_member_with_options",
+        tr(
+            lang,
+            "the reversible membership probe is unavailable after removal of add_members",
+            "обратимая проверка состава недоступна после удаления add_members",
+        ),
+    );
 
     if !confirm(
         lang,
@@ -2613,8 +2779,6 @@ async fn run_group_phase(
                 "bot.edit_chat(rollback)",
                 "bot.add_admins",
                 "bot.remove_admin",
-                "bot.add_members",
-                "bot.remove_member_with_options",
                 "bot.delete_chat",
                 "bot.leave_chat",
             ],
@@ -2717,8 +2881,6 @@ async fn run_group_phase(
                 "bot.edit_chat",
                 "bot.add_admins",
                 "bot.remove_admin",
-                "bot.add_members",
-                "bot.remove_member_with_options",
                 "bot.delete_chat",
                 "bot.leave_chat",
             ],
@@ -3108,75 +3270,6 @@ async fn run_group_phase(
         );
     }
 
-    let member_user_id = prompt_optional_i64(
-        lang,
-        tr(
-            lang,
-            "Enter a user_id for bot.add_members/bot.remove_member_with_options, or leave blank to skip",
-            "Введите user_id для bot.add_members/bot.remove_member_with_options, или оставьте поле пустым для пропуска",
-        ),
-    )?;
-    if let Some(user_id) = member_user_id {
-        let added = harness
-            .api_case(report, "bot.add_members", move |bot| async move {
-                bot.add_members(group_chat_id, vec![user_id]).await
-            })
-            .await
-            .is_some();
-
-        if added {
-            let block = confirm(
-                lang,
-                tr(
-                    lang,
-                    "Pass block=true to remove_member_with_options? This may block the user from rejoining linked chats.",
-                    "Передать block=true в remove_member_with_options? Это может запретить пользователю повторно войти в чат по ссылке.",
-                ),
-                false,
-            )?;
-            let _ = harness
-                .api_case(
-                    report,
-                    "bot.remove_member_with_options",
-                    move |bot| async move {
-                        bot.remove_member_with_options(
-                            group_chat_id,
-                            user_id,
-                            RemoveMemberOptions::block(block),
-                        )
-                        .await
-                    },
-                )
-                .await;
-        } else {
-            report.skip(
-                "bot.remove_member_with_options",
-                tr(
-                    lang,
-                    "bot.add_members did not succeed",
-                    "bot.add_members не завершился успешно",
-                ),
-            );
-        }
-    } else {
-        report.skip(
-            "bot.add_members",
-            tr(
-                lang,
-                "tester did not provide a user_id",
-                "тестер не указал user_id",
-            ),
-        );
-        report.skip(
-            "bot.remove_member_with_options",
-            tr(
-                lang,
-                "tester did not provide a user_id",
-                "тестер не указал user_id",
-            ),
-        );
-    }
-
     let delete_chat_id = prompt_optional_i64(
         lang,
         tr(
@@ -3429,6 +3522,7 @@ struct Config {
     token: String,
     bot_link: Option<String>,
     channel_link: Option<String>,
+    comment_post_id: Option<String>,
     webhook_url: Option<String>,
     webhook_secret: Option<String>,
     webhook_listen_addr: Option<String>,
@@ -3469,6 +3563,14 @@ impl Config {
                 lang,
                 "Public channel link for bot.get_chat_by_link (optional, e.g. https://max.ru/channel, channel, or @channel)",
                 "Публичная ссылка канала для bot.get_chat_by_link (необязательно, например https://max.ru/channel, channel или @channel)",
+            ),
+        )?;
+        let comment_post_id = prompt_optional(
+            lang,
+            tr(
+                lang,
+                "Channel post ID for the optional comments phase",
+                "ID поста канала для необязательного этапа комментариев",
             ),
         )?;
         let webhook_url_label = if transport == UpdateTransport::Webhook {
@@ -3589,6 +3691,7 @@ impl Config {
             transport,
             bot_link,
             channel_link,
+            comment_post_id,
             webhook_url,
             webhook_secret,
             webhook_listen_addr,

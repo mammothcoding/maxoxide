@@ -13,7 +13,10 @@ use axum::{
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use maxoxide::types::{BotCommand, GetCommentsOptions, NewCommentBody};
+use maxoxide::types::{
+    AnswerCallbackBody, AnswerCallbackOptions, BotCommand, GetCommentsOptions, NewCommentBody,
+    NewMessageBody,
+};
 use maxoxide::{Bot, MaxError, RateLimitConfig, RetryPolicy};
 
 #[derive(Debug, Clone)]
@@ -218,5 +221,50 @@ async fn uses_documented_command_and_comment_routes() {
     assert!(requests.iter().any(|request| {
         request.method == "DELETE" && request.query.as_deref() == Some("comment_id=comment")
     }));
+    server.abort();
+}
+
+#[tokio::test]
+async fn sends_callback_options_only_in_the_query() {
+    let (base_url, state, server) = start_server(false).await;
+    let bot = bot(&base_url, 1);
+
+    bot.answer_callback(AnswerCallbackBody {
+        callback_id: "default-callback".into(),
+        message: None,
+        notification: Some("done".into()),
+    })
+    .await
+    .unwrap();
+    bot.answer_callback_with_options(
+        AnswerCallbackBody {
+            callback_id: "preview-callback".into(),
+            message: Some(NewMessageBody::text("https://example.com")),
+            notification: None,
+        },
+        AnswerCallbackOptions::disable_link_preview(true),
+    )
+    .await
+    .unwrap();
+
+    let requests = state.requests.lock().unwrap();
+    let default_request = &requests[0];
+    assert_eq!(default_request.method, "POST");
+    assert_eq!(default_request.path, "/answers");
+    assert_eq!(
+        default_request.query.as_deref(),
+        Some("callback_id=default-callback")
+    );
+    assert!(!default_request.body.contains("callback_id"));
+    assert!(!default_request.body.contains("disable_link_preview"));
+    assert!(default_request.body.contains("notification"));
+
+    let options_request = &requests[1];
+    let query = options_request.query.as_deref().unwrap();
+    assert!(query.contains("callback_id=preview-callback"));
+    assert!(query.contains("disable_link_preview=true"));
+    assert!(!options_request.body.contains("callback_id"));
+    assert!(!options_request.body.contains("disable_link_preview"));
+    assert!(options_request.body.contains("https://example.com"));
     server.abort();
 }

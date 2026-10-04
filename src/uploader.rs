@@ -59,6 +59,12 @@ use crate::{
 
 const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+const MEGABYTE: u64 = 1_000_000;
+const GIGABYTE: u64 = 1_000_000_000;
+const MAX_IMAGE_SIZE: u64 = 50 * MEGABYTE;
+const MAX_VIDEO_SIZE: u64 = 250 * MEGABYTE;
+const MAX_AUDIO_SIZE: u64 = 256 * MEGABYTE;
+const MAX_FILE_SIZE: u64 = 4 * GIGABYTE;
 
 /// Progress reported while streaming a file to MAX.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -261,6 +267,45 @@ fn validate_upload_filename(filename: &str) -> Result<()> {
     Ok(())
 }
 
+fn upload_size_limit(upload_type: &UploadType) -> u64 {
+    match upload_type {
+        UploadType::Image => MAX_IMAGE_SIZE,
+        UploadType::Video => MAX_VIDEO_SIZE,
+        UploadType::Audio => MAX_AUDIO_SIZE,
+        UploadType::File => MAX_FILE_SIZE,
+    }
+}
+
+fn validate_upload_size(upload_type: &UploadType, size: u64, field: &str) -> Result<()> {
+    if size == 0 {
+        return Err(ValidationError::new(field, "upload content is empty").into());
+    }
+
+    let limit = upload_size_limit(upload_type);
+    if size > limit {
+        return Err(ValidationError::new(
+            field,
+            format!(
+                "size {size} exceeds the {limit} byte limit for {} uploads",
+                upload_type.as_str()
+            ),
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+async fn validate_upload_file(path: &Path, upload_type: &UploadType) -> Result<u64> {
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(ValidationError::new("path", "value does not point to a file").into());
+    }
+
+    validate_upload_size(upload_type, metadata.len(), "path")?;
+    Ok(metadata.len())
+}
+
 fn upload_api_error(status: StatusCode, body: String) -> ApiError {
     let value = serde_json::from_str::<serde_json::Value>(&body).ok();
     let code = value
@@ -345,15 +390,13 @@ impl Bot {
         options: UploadOptions,
     ) -> Result<String> {
         options.validate()?;
+        let path = path.as_ref();
+        let total = validate_upload_file(path, &upload_type).await?;
+        let filename = filename.into();
+        validate_upload_filename(&filename)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
         let response = self
-            .upload_file_to_url_body(
-                &endpoint,
-                path.as_ref(),
-                filename.into(),
-                mime.into(),
-                &options,
-            )
+            .upload_file_to_url_body(&endpoint, path, filename, mime.into(), total, &options)
             .await?;
         token_from_upload_response(&endpoint, &response, upload_type)
     }
@@ -366,8 +409,11 @@ impl Bot {
         filename: impl Into<String>,
         mime: impl Into<String>,
     ) -> Result<String> {
+        validate_upload_size(&upload_type, bytes.len() as u64, "bytes")?;
+        let filename = filename.into();
+        validate_upload_filename(&filename)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        self.upload_bytes_to_url(&endpoint, bytes, filename.into(), mime.into(), upload_type)
+        self.upload_bytes_to_url(&endpoint, bytes, filename, mime.into(), upload_type)
             .await
     }
 
@@ -701,23 +747,15 @@ impl Bot {
         path: &Path,
         filename: String,
         mime: String,
+        total: u64,
         options: &UploadOptions,
     ) -> Result<String> {
-        let metadata = tokio::fs::metadata(path).await?;
-        if !metadata.is_file() {
-            return Err(ValidationError::new("path", "value does not point to a file").into());
-        }
-        if metadata.len() == 0 {
-            return Err(ValidationError::new("path", "file is empty").into());
-        }
-        validate_upload_filename(&filename)?;
-
         if endpoint.token.is_some() {
-            self.upload_file_by_ranges(endpoint, path, &filename, metadata.len(), options)
+            self.upload_file_by_ranges(endpoint, path, &filename, total, options)
                 .await?;
             Ok(String::new())
         } else {
-            self.upload_file_multipart(endpoint, path, filename, mime, metadata.len(), options)
+            self.upload_file_multipart(endpoint, path, filename, mime, total, options)
                 .await
         }
     }
@@ -932,14 +970,19 @@ impl Bot {
         mime: impl Into<String>,
         text: Option<String>,
     ) -> Result<Message> {
+        let path = path.as_ref();
+        let total = validate_upload_file(path, &upload_type).await?;
+        let filename = filename.into();
+        validate_upload_filename(&filename)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
 
         let response = self
             .upload_file_to_url_body(
                 &endpoint,
-                path.as_ref(),
-                filename.into(),
+                path,
+                filename,
                 mime.into(),
+                total,
                 &UploadOptions::default(),
             )
             .await?;
@@ -958,16 +1001,13 @@ impl Bot {
         mime: impl Into<String>,
         text: Option<String>,
     ) -> Result<Message> {
+        validate_upload_size(&upload_type, bytes.len() as u64, "bytes")?;
+        let filename = filename.into();
+        validate_upload_filename(&filename)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
 
         let attachment = self
-            .upload_bytes_to_url_as_attachment(
-                &endpoint,
-                bytes,
-                filename.into(),
-                mime.into(),
-                upload_type,
-            )
+            .upload_bytes_to_url_as_attachment(&endpoint, bytes, filename, mime.into(), upload_type)
             .await?;
 
         self.send_uploaded_attachment(recipient, attachment, text)
@@ -991,8 +1031,9 @@ impl Bot {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CHUNK_SIZE, UploadOptions, attachment_from_upload_response, token_from_upload_response,
-        validate_upload_filename,
+        MAX_AUDIO_SIZE, MAX_CHUNK_SIZE, MAX_FILE_SIZE, MAX_IMAGE_SIZE, MAX_VIDEO_SIZE,
+        UploadOptions, attachment_from_upload_response, token_from_upload_response,
+        validate_upload_filename, validate_upload_size,
     };
     use crate::types::{NewAttachment, UploadEndpoint, UploadType};
 
@@ -1082,5 +1123,19 @@ mod tests {
     fn resumable_filename_rejects_header_injection() {
         assert!(validate_upload_filename("video.mp4").is_ok());
         assert!(validate_upload_filename("video.mp4\r\nX-Foo: bar").is_err());
+    }
+
+    #[test]
+    fn upload_size_validation_uses_decimal_api_limits() {
+        for (upload_type, limit) in [
+            (UploadType::Image, MAX_IMAGE_SIZE),
+            (UploadType::Video, MAX_VIDEO_SIZE),
+            (UploadType::Audio, MAX_AUDIO_SIZE),
+            (UploadType::File, MAX_FILE_SIZE),
+        ] {
+            assert!(validate_upload_size(&upload_type, limit, "bytes").is_ok());
+            assert!(validate_upload_size(&upload_type, 0, "bytes").is_err());
+            assert!(validate_upload_size(&upload_type, limit + 1, "bytes").is_err());
+        }
     }
 }

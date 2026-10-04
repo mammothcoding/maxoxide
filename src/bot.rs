@@ -1080,6 +1080,16 @@ impl Bot {
 
     /// POST /answers — Respond to an inline button callback.
     pub async fn answer_callback(&self, body: AnswerCallbackBody) -> Result<SimpleResult> {
+        self.answer_callback_with_options(body, AnswerCallbackOptions::default())
+            .await
+    }
+
+    /// Отвечает на callback с дополнительными query-параметрами.
+    pub async fn answer_callback_with_options(
+        &self,
+        body: AnswerCallbackBody,
+        options: AnswerCallbackOptions,
+    ) -> Result<SimpleResult> {
         #[derive(serde::Serialize)]
         struct AnswerBody {
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -1096,25 +1106,28 @@ impl Bot {
             RateLimitKey::Custom(body.callback_id.clone()),
         )
         .await;
+        let mut query = vec![("callback_id", body.callback_id)];
+        if let Some(disable_link_preview) = options.disable_link_preview {
+            query.push(("disable_link_preview", disable_link_preview.to_string()));
+        }
         self.post_with_query(
             "/answers",
             &AnswerBody {
                 message: body.message,
                 notification: body.notification,
             },
-            [("callback_id", body.callback_id)],
+            &query,
         )
         .await
     }
 
     // ────────────────────────────────────────────────
-    // Comments (currently marked unavailable by MAX)
+    // Comments
     // ────────────────────────────────────────────────
 
     /// GET /messages/{messageId}/comments — Get comments for a channel post.
     ///
-    /// MAX currently documents this API as temporarily unavailable. The typed
-    /// method is provided so applications can prepare and mock the contract.
+    /// Бот должен быть администратором канала с правом `read_all_messages`.
     pub async fn get_comments(
         &self,
         message_id: &str,
@@ -1413,6 +1426,9 @@ impl Bot {
     }
 
     /// POST /chats/{chatId}/members — Add members to a chat.
+    #[deprecated(
+        note = "MAX ограничил POST /chats/{chatId}/members 9 сентября 2026 года и удалил 30 сентября 2026 года"
+    )]
     pub async fn add_members(&self, chat_id: i64, user_ids: Vec<i64>) -> Result<SimpleResult> {
         self.post(
             &format!("/chats/{chat_id}/members"),

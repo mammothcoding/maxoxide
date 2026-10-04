@@ -118,7 +118,7 @@ cargo run --example digital_id --features digital-id
 - Use `chat_id` for a concrete dialog/group/channel and `user_id` for a global MAX user.
 - Never send a bot token in a query parameter. maxoxide uses the `Authorization` header.
 - Do not disable TLS verification. Custom clients can call `RussianTlsExt::russian_tls()`.
-- Comments are typed but MAX currently marks all five comment methods temporarily unavailable.
+- `Bot::add_members` is deprecated because MAX removed that endpoint on September 30, 2026 without a Bot API replacement.
 - Digital ID is an experimental partner integration without live service verification. Its payload schemas are issued during onboarding; validate the endpoint, authorization, and caller-owned serde models against the current partner documentation before production use.
 
 See [SECURITY.md](SECURITY.md), [API_SUPPORT.md](API_SUPPORT.md), and [CHANGELOG.md](CHANGELOG.md) before production deployment.

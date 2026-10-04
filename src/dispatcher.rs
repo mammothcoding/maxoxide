@@ -296,10 +296,18 @@ pub enum Filter {
     BotAdded,
     /// Fires when the bot is removed from a chat.
     BotRemoved,
+    /// Срабатывает при изменении прав бота-администратора.
+    BotAdminPermissionsChanged,
     /// Fires when a user stops the bot.
     BotStopped,
     /// Fires when a message is removed.
     MessageRemoved,
+    /// Срабатывает при создании комментария.
+    CommentCreated,
+    /// Срабатывает при изменении комментария.
+    CommentEdited,
+    /// Срабатывает при удалении комментария.
+    CommentRemoved,
     /// Fires when a nullable message-edit event is received without a message.
     MessageEditedMissing,
     /// Fires when a chat title changes.
@@ -398,6 +406,11 @@ impl Filter {
         Self::BotRemoved
     }
 
+    /// Выбирает события изменения прав бота-администратора.
+    pub fn bot_admin_permissions_changed() -> Self {
+        Self::BotAdminPermissionsChanged
+    }
+
     /// Matches events emitted when a user stops the bot.
     pub fn bot_stopped() -> Self {
         Self::BotStopped
@@ -406,6 +419,21 @@ impl Filter {
     /// Matches removed-message events.
     pub fn message_removed() -> Self {
         Self::MessageRemoved
+    }
+
+    /// Выбирает события создания комментария.
+    pub fn comment_created() -> Self {
+        Self::CommentCreated
+    }
+
+    /// Выбирает события изменения комментария.
+    pub fn comment_edited() -> Self {
+        Self::CommentEdited
+    }
+
+    /// Выбирает события удаления комментария.
+    pub fn comment_removed() -> Self {
+        Self::CommentRemoved
     }
 
     /// Matches message-edit events whose message payload is absent.
@@ -573,8 +601,14 @@ impl Filter {
             Self::BotStarted => matches!(update, Update::BotStarted { .. }),
             Self::BotAdded => matches!(update, Update::BotAdded { .. }),
             Self::BotRemoved => matches!(update, Update::BotRemoved { .. }),
+            Self::BotAdminPermissionsChanged => {
+                matches!(update, Update::BotAdminPermissionsChanged { .. })
+            }
             Self::BotStopped => matches!(update, Update::BotStopped { .. }),
             Self::MessageRemoved => matches!(update, Update::MessageRemoved { .. }),
+            Self::CommentCreated => matches!(update, Update::CommentCreated { .. }),
+            Self::CommentEdited => matches!(update, Update::CommentEdited { .. }),
+            Self::CommentRemoved => matches!(update, Update::CommentRemoved { .. }),
             Self::MessageEditedMissing => matches!(update, Update::MessageEditedMissing { .. }),
             Self::ChatTitleChanged => matches!(update, Update::ChatTitleChanged { .. }),
             Self::UserAdded => matches!(update, Update::UserAdded { .. }),
@@ -664,9 +698,10 @@ impl Not for Filter {
 
 fn message_from_update(update: &Update) -> Option<&Message> {
     match update {
-        Update::MessageCreated { message, .. } | Update::MessageEdited { message, .. } => {
-            Some(message)
-        }
+        Update::MessageCreated { message, .. }
+        | Update::MessageEdited { message, .. }
+        | Update::CommentCreated { message, .. }
+        | Update::CommentEdited { message, .. } => Some(message),
         Update::MessageCallback {
             message: Some(message),
             ..
@@ -868,6 +903,15 @@ impl Dispatcher {
         self.on_update(Filter::BotRemoved, handler)
     }
 
+    /// Регистрирует обработчик изменения прав бота-администратора.
+    pub fn on_bot_admin_permissions_changed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::BotAdminPermissionsChanged, handler)
+    }
+
     /// Register a handler that fires when a user stops the bot.
     pub fn on_bot_stopped<H, F>(&mut self, handler: H) -> &mut Self
     where
@@ -884,6 +928,33 @@ impl Dispatcher {
         F: Future<Output = Result<()>> + Send + 'static,
     {
         self.on_update(Filter::MessageRemoved, handler)
+    }
+
+    /// Регистрирует обработчик создания комментария.
+    pub fn on_comment_created<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::CommentCreated, handler)
+    }
+
+    /// Регистрирует обработчик изменения комментария.
+    pub fn on_comment_edited<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::CommentEdited, handler)
+    }
+
+    /// Регистрирует обработчик удаления комментария.
+    pub fn on_comment_removed<H, F>(&mut self, handler: H) -> &mut Self
+    where
+        H: Fn(Context) -> F + Send + Sync + 'static,
+        F: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.on_update(Filter::CommentRemoved, handler)
     }
 
     /// Register a handler for edited-message updates without a message payload.

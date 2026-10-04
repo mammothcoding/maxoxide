@@ -78,6 +78,8 @@ bot.subscribe(SubscribeBody {
 
 Do not run long polling and webhook delivery simultaneously for the same bot. Store the secret in a secret manager and rotate it by replacing the subscription and deployment configuration together.
 
+`bot_admin_permissions_changed` is a webhook-only MAX event. Register `Dispatcher::on_bot_admin_permissions_changed` and include that update type in `SubscribeBody::update_types` when filtering subscriptions.
+
 ## Status policy
 
 | Outcome | Status | Meaning |

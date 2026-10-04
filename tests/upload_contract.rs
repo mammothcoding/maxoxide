@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     io::Write,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -25,12 +28,14 @@ struct ChunkRequest {
 #[derive(Clone)]
 struct UploadState {
     upload_url: String,
+    upload_requests: Arc<AtomicUsize>,
     chunks: Arc<Mutex<Vec<ChunkRequest>>>,
     attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 async fn upload_api(State(state): State<UploadState>, request: Request<Body>) -> Response {
     if request.uri().path() == "/uploads" {
+        state.upload_requests.fetch_add(1, Ordering::SeqCst);
         return (
             StatusCode::OK,
             [("content-type", "application/json")],
@@ -74,6 +79,7 @@ async fn resumable_upload_retries_only_the_failed_chunk() {
     let address = listener.local_addr().unwrap();
     let state = UploadState {
         upload_url: format!("http://{address}/upload"),
+        upload_requests: Arc::new(AtomicUsize::new(0)),
         chunks: Arc::new(Mutex::new(Vec::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -136,6 +142,7 @@ async fn pre_cancelled_upload_stops_before_the_first_chunk() {
     let address = listener.local_addr().unwrap();
     let state = UploadState {
         upload_url: format!("http://{address}/upload"),
+        upload_requests: Arc::new(AtomicUsize::new(0)),
         chunks: Arc::new(Mutex::new(Vec::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -166,6 +173,69 @@ async fn pre_cancelled_upload_stops_before_the_first_chunk() {
         .await
         .unwrap_err();
     assert!(matches!(error, MaxError::Cancelled));
+    assert!(state.chunks.lock().unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn rejects_empty_and_oversized_uploads_before_requesting_an_upload_url() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = UploadState {
+        upload_url: format!("http://{address}/upload"),
+        upload_requests: Arc::new(AtomicUsize::new(0)),
+        chunks: Arc::new(Mutex::new(Vec::new())),
+        attempts: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let app = Router::new().fallback(upload_api).with_state(state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let bot = Bot::builder("token")
+        .base_url(format!("http://{address}"))
+        .rate_limits(RateLimitConfig::disabled())
+        .retry_policy(RetryPolicy::disabled())
+        .build()
+        .unwrap();
+
+    let empty_file = tempfile::NamedTempFile::new().unwrap();
+    let oversized_file = tempfile::NamedTempFile::new().unwrap();
+    oversized_file.as_file().set_len(50_000_001).unwrap();
+
+    let errors = [
+        bot.upload_file(
+            UploadType::Image,
+            empty_file.path(),
+            "empty.png",
+            "image/png",
+        )
+        .await
+        .unwrap_err(),
+        bot.send_image_to_chat(42, oversized_file.path(), "large.png", "image/png", None)
+            .await
+            .unwrap_err(),
+        bot.upload_bytes(UploadType::Image, Vec::new(), "empty.png", "image/png")
+            .await
+            .unwrap_err(),
+        bot.send_image_bytes_to_chat(42, Vec::new(), "empty.png", "image/png", None)
+            .await
+            .unwrap_err(),
+        bot.upload_bytes(
+            UploadType::Image,
+            vec![0; 50_000_001],
+            "large.png",
+            "image/png",
+        )
+        .await
+        .unwrap_err(),
+    ];
+
+    assert!(
+        errors
+            .iter()
+            .all(|error| matches!(error, MaxError::Validation(_)))
+    );
+    assert_eq!(state.upload_requests.load(Ordering::SeqCst), 0);
     assert!(state.chunks.lock().unwrap().is_empty());
     server.abort();
 }

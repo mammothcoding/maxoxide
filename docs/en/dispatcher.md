@@ -19,7 +19,7 @@ dispatcher.on_update(
 );
 ```
 
-Built-ins cover messages, edits, callbacks and exact callback payloads, bot/user/chat lifecycle events, constructed-message events, exact/contains/regex text, chat/sender IDs, attachment kinds, unknown updates, AND, OR, NOT, and custom predicates.
+Built-ins cover messages, edits, comments, callbacks and exact callback payloads, bot/user/chat lifecycle events, bot administrator permission changes, constructed-message events, exact/contains/regex text, chat/sender IDs, attachment kinds, unknown updates, AND, OR, NOT, and custom predicates. Use `on_comment_created`, `on_comment_edited`, `on_comment_removed`, and `on_bot_admin_permissions_changed` for the corresponding events.
 
 Regex construction is fallible and returns a local `ValidationError` instead of an API-shaped error.
 

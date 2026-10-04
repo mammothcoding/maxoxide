@@ -11,6 +11,8 @@ bot.send_text_to_user(user_id, "Send by global user ID").await?;
 
 Use `SendMessageOptions::disable_link_preview` when the corresponding MAX query flag is needed.
 
+For a replacement message sent while answering a callback, use `answer_callback_with_options` and `AnswerCallbackOptions::disable_link_preview`. The flag is encoded as a `POST /answers` query parameter, not in the JSON body.
+
 ## Formatting and links
 
 ```rust
@@ -78,6 +80,8 @@ let token = bot.upload_file(
 
 `upload_bytes` is intentionally memory-backed because the caller already owns a `Vec<u8>`.
 
+Before requesting `/uploads`, all file and byte helpers reject empty content and enforce MAX's decimal size limits: image 50 MB, video 250 MB, audio 256 MB, and file 4 GB. Image dimensions up to 7680x7680 and the 60-minute audio duration limit remain server-side checks.
+
 ## Resumable upload
 
 When MAX returns an upload token, file upload automatically switches to raw `Content-Range` chunks using the headers expected by the official TypeScript SDK. Each chunk is sent sequentially. Only a failed chunk is replayed after a transport, 429, or 5xx failure; completed chunks are not resent.
@@ -111,4 +115,4 @@ Helpers such as `send_image_to_chat`, `send_video_to_user`, and their byte varia
 
 ## Comments
 
-The five typed methods are `get_comments`, `get_comment`, `create_comment`, `edit_comment`, and `delete_comment`. MAX currently labels all of them temporarily unavailable. Treat them as an experimental contract: test against mocks, handle API failures, and do not make a production workflow depend on their availability yet.
+The five typed methods are `get_comments`, `get_comment`, `create_comment`, `edit_comment`, and `delete_comment`. The bot needs the channel access and administrator permissions required by MAX. Incoming changes are available as the typed `CommentCreated`, `CommentEdited`, and `CommentRemoved` updates.

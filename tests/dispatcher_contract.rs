@@ -24,6 +24,10 @@ fn message_update(text: &str) -> Update {
     .unwrap()
 }
 
+fn update(value: serde_json::Value) -> Update {
+    serde_json::from_value(value).unwrap()
+}
+
 #[tokio::test]
 async fn middleware_wraps_handlers_and_context_exposes_state() {
     let order = Arc::new(Mutex::new(Vec::new()));
@@ -90,4 +94,88 @@ async fn concurrent_dispatch_never_exceeds_the_configured_bound() {
     }
 
     assert_eq!(maximum.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn dispatches_comment_and_admin_permission_handlers() {
+    let handled = Arc::new(Mutex::new(Vec::new()));
+    let mut dispatcher = Dispatcher::new(Bot::new("token").unwrap());
+
+    for (register, name) in [
+        (
+            Dispatcher::on_comment_created::<_, _> as fn(&mut Dispatcher, _) -> &mut Dispatcher,
+            "comment_created",
+        ),
+        (Dispatcher::on_comment_edited::<_, _>, "comment_edited"),
+        (Dispatcher::on_comment_removed::<_, _>, "comment_removed"),
+        (
+            Dispatcher::on_bot_admin_permissions_changed::<_, _>,
+            "bot_admin_permissions_changed",
+        ),
+    ] {
+        let handled = handled.clone();
+        register(&mut dispatcher, move |_context: Context| {
+            let handled = handled.clone();
+            async move {
+                handled.lock().unwrap().push(name);
+                Ok(())
+            }
+        });
+    }
+
+    let comment = serde_json::json!({
+        "sender": {"user_id": 7, "first_name": "Reader"},
+        "recipient": {"chat_id": -42, "chat_type": "channel", "post_id": "post-1"},
+        "timestamp": 1000,
+        "body": {"mid": "comment-1", "seq": 1, "text": "hello"}
+    });
+    let updates = [
+        serde_json::json!({
+            "update_type": "comment_created",
+            "timestamp": 1001,
+            "message": comment
+        }),
+        serde_json::json!({
+            "update_type": "comment_edited",
+            "timestamp": 1002,
+            "message": {
+                "sender": {"user_id": 7, "first_name": "Reader"},
+                "recipient": {"chat_id": -42, "chat_type": "channel", "post_id": "post-1"},
+                "timestamp": 1002,
+                "body": {"mid": "comment-1", "seq": 2, "text": "edited"}
+            }
+        }),
+        serde_json::json!({
+            "update_type": "comment_removed",
+            "timestamp": 1003,
+            "message_id": "comment-1",
+            "user_id": 7,
+            "chat_id": -42,
+            "post_id": "post-1"
+        }),
+        serde_json::json!({
+            "update_type": "bot_admin_permissions_changed",
+            "timestamp": 1004,
+            "chat_id": -42,
+            "user_id": 7,
+            "bot_id": 8,
+            "is_channel": true,
+            "is_admin": true,
+            "permissions": ["read_all_messages"]
+        }),
+    ];
+
+    for value in updates {
+        dispatcher.dispatch(update(value)).await.unwrap();
+    }
+
+    assert_eq!(
+        *handled.lock().unwrap(),
+        [
+            "comment_created",
+            "comment_edited",
+            "comment_removed",
+            "bot_admin_permissions_changed"
+        ]
+    );
 }

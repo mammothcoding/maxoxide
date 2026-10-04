@@ -15,7 +15,7 @@ git checkout "v<version>"
 cargo run --example live_api_test
 ```
 
-Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v3.0.0` for version `3.0.0`. To exercise unreleased code from the default branch, omit `git checkout`.
+Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v3.1.0` for version `3.1.0`. To exercise unreleased code from the default branch, omit `git checkout`.
 
 Rust 1.85 or newer is required.
 
@@ -47,6 +47,7 @@ The remaining prompts are optional unless the current scenario needs them:
 
 - bot URL shown during manual private-chat activation;
 - public channel link for `get_chat_by_link`;
+- channel post ID for the optional comments phase;
 - public webhook URL and webhook secret;
 - local file, image, video, and audio paths;
 - delay between API requests, 400 ms by default;
@@ -64,9 +65,10 @@ The example checks or offers interactive checks for:
 - chat- and user-addressed text, Markdown, structured messages, and link-preview options;
 - keyboards, callbacks, message buttons, contact/location requests, clipboard, Mini App, and chat buttons;
 - message retrieval, editing, and deletion;
+- comment listing and optional confirmed creation, retrieval, editing, and deletion;
 - upload URLs, streamed file/byte uploads, and optional image/video/audio send helpers;
 - webhook subscriptions and optional temporary command-menu replacement;
-- optional group metadata, members, administrators, sender actions, pinning, title rollback, membership changes, leaving, and deletion.
+- optional group metadata, members, administrators, sender actions, pinning, title rollback, leaving, and deletion.
 
 Optional scenarios without the required input or manual confirmation are reported as `SKIP`. The final summary lists every `PASS`, `FAIL`, and `SKIP`; one or more failures produce a non-zero process exit status.
 
@@ -78,8 +80,8 @@ The example asks before optional or destructive operations, but confirmed action
 - webhook subscriptions may be removed and recreated;
 - the bot command menu may be replaced temporarily;
 - a group title may be changed and rolled back;
-- administrator or membership state may be changed;
-- `block=true` may prevent a removed member from rejoining through a link;
+- administrator state may be changed;
+- a temporary comment is created, edited, and deleted when the comments probe is confirmed;
 - `delete_chat` and `leave_chat` are destructive and cannot be rolled back by maxoxide;
 - a chat button may create a real chat, after which the example asks whether to delete it, leave it, or keep it.
 
@@ -89,7 +91,7 @@ MAX does not return webhook secrets from `get_subscriptions`. If an existing sub
 
 ## Limitations
 
-- MAX currently marks the comments API temporarily unavailable, so comment operations are reported as `SKIP`.
+- `Bot::add_members` and the formerly reversible member-removal probe are reported as `SKIP` because MAX removed the add-members endpoint on September 30, 2026.
 - The experimental Digital ID partner integration is outside this example and requires separate credentials and onboarding schemas.
 - A successful run validates the selected scenarios for that bot, account, client, and point in time. It does not prove production capacity, availability, or correctness of application-specific handlers.
 - Treat console output as diagnostic data and review it before sharing. Do not publish credentials, personal data, chat identifiers, or webhook details.

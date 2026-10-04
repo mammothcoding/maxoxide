@@ -118,7 +118,7 @@ cargo run --example digital_id --features digital-id
 - `chat_id` обозначает конкретный диалог, группу или канал; `user_id` — глобального пользователя MAX.
 - Нельзя передавать токен бота в query. maxoxide использует заголовок `Authorization`.
 - Не отключайте проверку TLS. Для своего клиента используйте `RussianTlsExt::russian_tls()`.
-- Все пять методов комментариев типизированы, но MAX сейчас помечает их как временно недоступные.
+- `Bot::add_members` помечен устаревшим: MAX удалил этот endpoint 30 сентября 2026 года без замены в Bot API.
 - Digital ID является experimental partner integration без проверки на live service. Перед production сверяйте endpoint, authorization и пользовательские serde-модели с актуальной onboarding-документацией MAX.
 
 Перед production-развёртыванием прочитайте [SECURITY.md](SECURITY.md), [API_SUPPORT.md](API_SUPPORT.md) и [CHANGELOG.md](CHANGELOG.md).

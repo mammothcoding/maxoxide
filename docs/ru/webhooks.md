@@ -78,6 +78,8 @@ bot.subscribe(SubscribeBody {
 
 Не запускайте одновременно Long Polling и Webhook для одного бота. Храните secret в secret manager и меняйте subscription и deployment configuration вместе.
 
+MAX доставляет событие `bot_admin_permissions_changed` только через webhook. Зарегистрируйте `Dispatcher::on_bot_admin_permissions_changed` и добавьте этот тип update в `SubscribeBody::update_types`, если подписка фильтрует события.
+
 ## Политика статусов
 
 | Outcome | Status | Значение |

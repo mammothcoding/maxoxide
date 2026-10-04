@@ -11,6 +11,8 @@ bot.send_text_to_user(user_id, "Отправить по глобальному u
 
 Если нужен соответствующий query-флаг MAX, используйте `SendMessageOptions::disable_link_preview`.
 
+Для заменяющего сообщения при ответе на callback используйте `answer_callback_with_options` и `AnswerCallbackOptions::disable_link_preview`. Флаг передаётся как query-параметр `POST /answers`, а не в JSON body.
+
 ## Форматирование и ссылки
 
 ```rust
@@ -78,6 +80,8 @@ let token = bot.upload_file(
 
 `upload_bytes` намеренно работает в памяти, поскольку вызывающий код уже владеет `Vec<u8>`.
 
+До запроса `/uploads` все методы для файлов и bytes отклоняют пустое содержимое и проверяют десятичные лимиты MAX: изображение 50 MB, видео 250 MB, аудио 256 MB, файл 4 GB. Ограничение изображения 7680x7680 и длительность аудио до 60 минут остаются проверками сервера.
+
 ## Resumable upload
 
 Если MAX вернул upload token, файловая загрузка автоматически переходит на raw `Content-Range` chunks с заголовками из официального TypeScript SDK. Чанки отправляются последовательно. После transport, 429 или 5xx повторяется только неуспешный chunk; завершённые части не отправляются заново.
@@ -111,4 +115,4 @@ Chunk size должен находиться между 1 байтом и 16 М�
 
 ## Комментарии
 
-Пять typed methods: `get_comments`, `get_comment`, `create_comment`, `edit_comment`, `delete_comment`. Сейчас MAX помечает их как временно недоступные. Считайте контракт experimental: используйте mock, обрабатывайте API failures и пока не делайте production-процесс зависимым от их доступности.
+Доступны пять типизированных методов: `get_comments`, `get_comment`, `create_comment`, `edit_comment`, `delete_comment`. Боту нужны доступ к каналу и требуемые MAX права администратора. Входящие изменения представлены типизированными updates `CommentCreated`, `CommentEdited` и `CommentRemoved`.

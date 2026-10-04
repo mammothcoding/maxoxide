@@ -1,6 +1,6 @@
 [package]
 name = "maxoxide"
-version = "3.0.0"
+version = "3.1.0"
 authors = ["Mammoth <dev@mtcoding.com>"]
 edition = "2024"
 rust-version = "1.85"

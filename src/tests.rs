@@ -124,6 +124,133 @@ fn test_update_message_callback_roundtrip() {
 }
 
 #[test]
+fn test_comment_updates_roundtrip_and_expose_common_fields() {
+    let comment_message = serde_json::json!({
+        "sender": {"user_id": 7, "first_name": "Reader"},
+        "recipient": {"chat_id": -42, "chat_type": "channel", "post_id": "post-1"},
+        "timestamp": 1_700_000_000,
+        "body": {"mid": "comment-1", "seq": 1, "text": "hello"}
+    });
+    let created: Update = serde_json::from_value(serde_json::json!({
+        "update_type": "comment_created",
+        "timestamp": 1_700_000_001,
+        "message": comment_message
+    }))
+    .unwrap();
+
+    assert_eq!(created.update_type(), Some("comment_created"));
+    assert_eq!(created.timestamp(), Some(1_700_000_001));
+    assert_eq!(created.chat_id(), Some(-42));
+    assert!(Filter::comment_created().matches(&created));
+    assert!(Filter::chat(-42).matches(&created));
+    assert!(Filter::text_exact("hello").matches(&created));
+    assert!(matches!(
+        created,
+        Update::CommentCreated { message, .. } if message.body.mid == "comment-1"
+    ));
+
+    let edited: Update = serde_json::from_value(serde_json::json!({
+        "update_type": "comment_edited",
+        "timestamp": 1_700_000_002,
+        "message": {
+            "sender": {"user_id": 7, "first_name": "Reader"},
+            "recipient": {"chat_id": -42, "chat_type": "channel", "post_id": "post-1"},
+            "timestamp": 1_700_000_002,
+            "body": {"mid": "comment-1", "seq": 2, "text": "edited"}
+        }
+    }))
+    .unwrap();
+    assert_eq!(edited.update_type(), Some("comment_edited"));
+    assert_eq!(edited.chat_id(), Some(-42));
+    assert!(Filter::comment_edited().matches(&edited));
+
+    let removed: Update = serde_json::from_value(serde_json::json!({
+        "update_type": "comment_removed",
+        "timestamp": 1_700_000_003,
+        "message_id": "comment-1",
+        "user_id": 7,
+        "chat_id": -42,
+        "post_id": "post-1"
+    }))
+    .unwrap();
+    assert_eq!(removed.update_type(), Some("comment_removed"));
+    assert_eq!(removed.chat_id(), Some(-42));
+    assert!(Filter::comment_removed().matches(&removed));
+    assert!(matches!(
+        removed,
+        Update::CommentRemoved {
+            message_id,
+            user_id: 7,
+            post_id,
+            ..
+        } if message_id == "comment-1" && post_id == "post-1"
+    ));
+}
+
+#[test]
+fn test_bot_admin_permissions_changed_roundtrip() {
+    let update: Update = serde_json::from_value(serde_json::json!({
+        "update_type": "bot_admin_permissions_changed",
+        "timestamp": 1_700_000_004,
+        "chat_id": -42,
+        "user_id": 7,
+        "bot_id": 8,
+        "is_channel": true,
+        "is_admin": true,
+        "permissions": ["read_all_messages", "future_permission"]
+    }))
+    .unwrap();
+
+    assert_eq!(update.update_type(), Some("bot_admin_permissions_changed"));
+    assert_eq!(update.timestamp(), Some(1_700_000_004));
+    assert_eq!(update.chat_id(), Some(-42));
+    assert!(Filter::bot_admin_permissions_changed().matches(&update));
+    assert!(matches!(
+        update,
+        Update::BotAdminPermissionsChanged {
+            user_id: 7,
+            bot_id: 8,
+            is_channel: true,
+            is_admin: true,
+            permissions: Some(permissions),
+            ..
+        } if permissions == [
+            ChatAdminPermission::ReadAllMessages,
+            ChatAdminPermission::Unknown("future_permission".into())
+        ]
+    ));
+}
+
+#[test]
+fn test_malformed_known_updates_fall_back_to_unknown() {
+    for value in [
+        serde_json::json!({
+            "update_type": "comment_removed",
+            "timestamp": 1_700_000_003,
+            "message_id": "comment-1",
+            "user_id": 7,
+            "chat_id": -42
+        }),
+        serde_json::json!({
+            "update_type": "bot_admin_permissions_changed",
+            "timestamp": 1_700_000_004,
+            "chat_id": -42,
+            "user_id": 7,
+            "is_channel": true,
+            "is_admin": true,
+            "permissions": []
+        }),
+    ] {
+        let expected = value.clone();
+        let update: Update = serde_json::from_value(value).unwrap();
+        let Update::Unknown { raw, .. } = update else {
+            panic!("malformed known update should remain available as raw JSON");
+        };
+        assert_eq!(raw, expected);
+    }
+}
+
+#[test]
 fn test_update_bot_started_roundtrip() {
     let json = r#"{
             "update_type": "bot_started",
