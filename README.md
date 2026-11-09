@@ -6,13 +6,13 @@
 
 Production-oriented async Rust SDK for the [MAX messenger](https://max.ru) Bot API.
 
-[Russian README](README.ru.md) | [English guides](docs/en/README.md) | [Russian guides](docs/ru/README.md) | [API support](API_SUPPORT.md) | [v3 migration](MIGRATION.md)
+[Russian README](README.ru.md) | [English guides](docs/en/README.md) | [Russian guides](docs/ru/README.md) | [API support](API_SUPPORT.md) | [v4 migration](MIGRATION.md)
 
 ## Install
 
 ```toml
 [dependencies]
-maxoxide = "3"
+maxoxide = "4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -61,8 +61,9 @@ MAX recommends HTTPS webhooks for production. Long polling is intended for devel
 ## Highlights
 
 - Typed messages, chats, members, callbacks, constructed-message events, comments, subscriptions, and uploads.
+- Current message pagination with `before`/`after`, typed video-message metadata, and forward-compatible media payloads.
 - Structured `ApiError` with MAX code, bounded raw diagnostics, and `Retry-After` support.
-- Secure builder with embedded Russian Trusted Root CA, configurable timeouts, HTTP/SOCKS proxy, retries, and base URL.
+- Secure builder with embedded Russian Trusted Root CA, configurable timeouts, HTTP/SOCKS proxy, retries, base URL, and opt-out client telemetry.
 - Local 30 RPS global and per-recipient message-operation limits.
 - Bounded-memory multipart streaming and resumable `Content-Range` uploads with chunk retry, progress, and cancellation.
 - Exact command parsing, composable filters, middleware, typed state, bounded concurrency, scheduled tasks, and graceful shutdown.

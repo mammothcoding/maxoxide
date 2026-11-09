@@ -14,8 +14,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use maxoxide::types::{
-    AnswerCallbackBody, AnswerCallbackOptions, BotCommand, GetCommentsOptions, NewCommentBody,
-    NewMessageBody,
+    AnswerCallbackBody, AnswerCallbackOptions, BotCommand, GetCommentsOptions, GetMessagesOptions,
+    NewCommentBody, NewMessageBody,
 };
 use maxoxide::{Bot, MaxError, RateLimitConfig, RetryPolicy};
 
@@ -25,6 +25,9 @@ struct RecordedRequest {
     path: String,
     query: Option<String>,
     authorization: Option<String>,
+    client_name: Option<String>,
+    client_version: Option<String>,
+    client_runtime: Option<String>,
     body: String,
 }
 
@@ -44,12 +47,18 @@ async fn api(State(state): State<TestState>, request: Request<Body>) -> Response
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .map(String::from);
+    let client_name = request_header(&request, "x-max-client-name");
+    let client_version = request_header(&request, "x-max-client-version");
+    let client_runtime = request_header(&request, "x-max-client-runtime");
     let body = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
     state.requests.lock().unwrap().push(RecordedRequest {
         method: method.clone(),
         path: path.clone(),
         query,
         authorization,
+        client_name,
+        client_version,
+        client_runtime,
         body: String::from_utf8(body.to_vec()).unwrap(),
     });
 
@@ -74,6 +83,7 @@ async fn api(State(state): State<TestState>, request: Request<Body>) -> Response
         }"#
         }
         ("PATCH", "/me/commands") => r#"{"commands":[{"name":"start","description":"Start"}]}"#,
+        ("GET", "/messages") => r#"{"messages":[]}"#,
         ("GET", "/messages/post/comments") => r#"{"messages":[],"marker":42}"#,
         ("GET", "/messages/post/comments/comment") => comment_json(),
         ("POST", "/messages/post/comments") => {
@@ -98,6 +108,20 @@ async fn api(State(state): State<TestState>, request: Request<Body>) -> Response
         _ => r#"{"success":true}"#,
     };
     (StatusCode::OK, [("content-type", "application/json")], body).into_response()
+}
+
+fn request_header(request: &Request<Body>, name: &str) -> Option<String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(String::from)
+}
+
+fn query_pairs(query: Option<&str>) -> std::collections::HashMap<String, String> {
+    url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .into_owned()
+        .collect()
 }
 
 fn comment_json() -> &'static str {
@@ -164,6 +188,153 @@ async fn retries_429_and_preserves_structured_errors() {
             .iter()
             .all(|request| request.authorization.as_deref() == Some("secret-token"))
     );
+    assert!(state.requests.lock().unwrap().iter().all(|request| {
+        request.client_name.as_deref() == Some("maxoxide")
+            && request.client_version.as_deref() == Some(env!("CARGO_PKG_VERSION"))
+            && request.client_runtime.as_deref()
+                == Some(
+                    format!("rust/{}-{}", std::env::consts::OS, std::env::consts::ARCH).as_str(),
+                )
+    }));
+    server.abort();
+}
+
+#[tokio::test]
+async fn supports_custom_and_disabled_client_telemetry() {
+    let (base_url, state, server) = start_server(false).await;
+    let custom = Bot::builder("secret-token")
+        .base_url(&base_url)
+        .rate_limits(RateLimitConfig::disabled())
+        .retry_policy(RetryPolicy::disabled())
+        .client_telemetry("custom-sdk", "9.8.7", "rust/test-runtime")
+        .build()
+        .unwrap();
+    custom.get_me().await.unwrap();
+
+    let disabled = Bot::builder("secret-token")
+        .base_url(&base_url)
+        .rate_limits(RateLimitConfig::disabled())
+        .retry_policy(RetryPolicy::disabled())
+        .disable_client_telemetry()
+        .build()
+        .unwrap();
+    disabled.get_me().await.unwrap();
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].client_name.as_deref(), Some("custom-sdk"));
+    assert_eq!(requests[0].client_version.as_deref(), Some("9.8.7"));
+    assert_eq!(
+        requests[0].client_runtime.as_deref(),
+        Some("rust/test-runtime")
+    );
+    assert!(requests[1].client_name.is_none());
+    assert!(requests[1].client_version.is_none());
+    assert!(requests[1].client_runtime.is_none());
+    server.abort();
+}
+
+#[test]
+fn rejects_invalid_client_telemetry() {
+    let error = Bot::builder("secret-token")
+        .client_telemetry("invalid\nname", "1.0", "rust/test")
+        .build()
+        .err()
+        .unwrap();
+
+    assert!(matches!(error, MaxError::Configuration(_)));
+}
+
+#[tokio::test]
+async fn sends_current_and_legacy_message_pagination_and_validates_bounds() {
+    let (base_url, state, server) = start_server(false).await;
+    let bot = bot(&base_url, 1);
+
+    bot.get_messages_with_options(
+        42,
+        GetMessagesOptions {
+            count: Some(20),
+            before: Some(2_000),
+            after: Some(1_000),
+        },
+    )
+    .await
+    .unwrap();
+    bot.get_messages_by_ids_with_options(
+        ["first", "second"],
+        GetMessagesOptions {
+            count: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    bot.get_messages(42, Some(3), Some(3_000), Some(2_000))
+        .await
+        .unwrap();
+    bot.get_messages_by_ids(["legacy"], Some(1), Some(3_000), Some(2_000))
+        .await
+        .unwrap();
+
+    {
+        let requests = state.requests.lock().unwrap();
+        let chat_query = query_pairs(requests[0].query.as_deref());
+        assert_eq!(chat_query.get("chat_id").map(String::as_str), Some("42"));
+        assert_eq!(chat_query.get("count").map(String::as_str), Some("20"));
+        assert_eq!(chat_query.get("before").map(String::as_str), Some("2000"));
+        assert_eq!(chat_query.get("after").map(String::as_str), Some("1000"));
+        let ids_query = query_pairs(requests[1].query.as_deref());
+        assert_eq!(
+            ids_query.get("message_ids").map(String::as_str),
+            Some("first,second")
+        );
+        assert_eq!(ids_query.get("count").map(String::as_str), Some("2"));
+        let legacy_chat_query = query_pairs(requests[2].query.as_deref());
+        assert_eq!(
+            legacy_chat_query.get("from").map(String::as_str),
+            Some("3000")
+        );
+        assert_eq!(
+            legacy_chat_query.get("to").map(String::as_str),
+            Some("2000")
+        );
+        assert!(!legacy_chat_query.contains_key("before"));
+        assert!(!legacy_chat_query.contains_key("after"));
+        let legacy_ids_query = query_pairs(requests[3].query.as_deref());
+        assert_eq!(
+            legacy_ids_query.get("message_ids").map(String::as_str),
+            Some("legacy")
+        );
+        assert_eq!(
+            legacy_ids_query.get("from").map(String::as_str),
+            Some("3000")
+        );
+        assert_eq!(legacy_ids_query.get("to").map(String::as_str), Some("2000"));
+    }
+
+    for options in [
+        GetMessagesOptions {
+            count: Some(0),
+            ..Default::default()
+        },
+        GetMessagesOptions {
+            count: Some(101),
+            ..Default::default()
+        },
+        GetMessagesOptions {
+            before: Some(-1),
+            ..Default::default()
+        },
+        GetMessagesOptions {
+            after: Some(-1),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            bot.get_messages_with_options(42, options).await,
+            Err(MaxError::Validation(_))
+        ));
+    }
+    assert_eq!(state.requests.lock().unwrap().len(), 4);
     server.abort();
 }
 
@@ -225,6 +396,7 @@ async fn uses_documented_command_and_comment_routes() {
 }
 
 #[tokio::test]
+#[allow(deprecated)]
 async fn sends_callback_options_only_in_the_query() {
     let (base_url, state, server) = start_server(false).await;
     let bot = bot(&base_url, 1);

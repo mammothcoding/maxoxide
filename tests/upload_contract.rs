@@ -23,12 +23,23 @@ use maxoxide::{Bot, MaxError, RateLimitConfig, RetryPolicy};
 struct ChunkRequest {
     range: String,
     body: Vec<u8>,
+    client_name: Option<String>,
+    client_version: Option<String>,
+    client_runtime: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TelemetryHeaders {
+    client_name: Option<String>,
+    client_version: Option<String>,
+    client_runtime: Option<String>,
 }
 
 #[derive(Clone)]
 struct UploadState {
     upload_url: String,
     upload_requests: Arc<AtomicUsize>,
+    upload_telemetry: Arc<Mutex<Vec<TelemetryHeaders>>>,
     chunks: Arc<Mutex<Vec<ChunkRequest>>>,
     attempts: Arc<Mutex<HashMap<String, usize>>>,
 }
@@ -36,6 +47,11 @@ struct UploadState {
 async fn upload_api(State(state): State<UploadState>, request: Request<Body>) -> Response {
     if request.uri().path() == "/uploads" {
         state.upload_requests.fetch_add(1, Ordering::SeqCst);
+        state
+            .upload_telemetry
+            .lock()
+            .unwrap()
+            .push(telemetry_headers(&request));
         return (
             StatusCode::OK,
             [("content-type", "application/json")],
@@ -51,6 +67,7 @@ async fn upload_api(State(state): State<UploadState>, request: Request<Body>) ->
         .to_str()
         .unwrap()
         .to_string();
+    let telemetry = telemetry_headers(&request);
     let body = to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap()
@@ -58,6 +75,9 @@ async fn upload_api(State(state): State<UploadState>, request: Request<Body>) ->
     state.chunks.lock().unwrap().push(ChunkRequest {
         range: range.clone(),
         body,
+        client_name: telemetry.client_name,
+        client_version: telemetry.client_version,
+        client_runtime: telemetry.client_runtime,
     });
     let mut attempts = state.attempts.lock().unwrap();
     let attempt = attempts.entry(range.clone()).or_default();
@@ -73,6 +93,21 @@ async fn upload_api(State(state): State<UploadState>, request: Request<Body>) ->
     StatusCode::OK.into_response()
 }
 
+fn telemetry_headers(request: &Request<Body>) -> TelemetryHeaders {
+    let header = |name| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(String::from)
+    };
+    TelemetryHeaders {
+        client_name: header("x-max-client-name"),
+        client_version: header("x-max-client-version"),
+        client_runtime: header("x-max-client-runtime"),
+    }
+}
+
 #[tokio::test]
 async fn resumable_upload_retries_only_the_failed_chunk() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -80,6 +115,7 @@ async fn resumable_upload_retries_only_the_failed_chunk() {
     let state = UploadState {
         upload_url: format!("http://{address}/upload"),
         upload_requests: Arc::new(AtomicUsize::new(0)),
+        upload_telemetry: Arc::new(Mutex::new(Vec::new())),
         chunks: Arc::new(Mutex::new(Vec::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -133,6 +169,22 @@ async fn resumable_upload_retries_only_the_failed_chunk() {
     let progress = progress.lock().unwrap();
     assert_eq!(progress.last().unwrap().uploaded, 10);
     assert_eq!(progress.last().unwrap().percent, 100.0);
+    let upload_telemetry = state.upload_telemetry.lock().unwrap();
+    assert_eq!(upload_telemetry.len(), 1);
+    assert_eq!(upload_telemetry[0].client_name.as_deref(), Some("maxoxide"));
+    assert_eq!(
+        upload_telemetry[0].client_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        upload_telemetry[0].client_runtime.as_deref(),
+        Some(format!("rust/{}-{}", std::env::consts::OS, std::env::consts::ARCH).as_str())
+    );
+    assert!(chunks.iter().all(|chunk| {
+        chunk.client_name.is_none()
+            && chunk.client_version.is_none()
+            && chunk.client_runtime.is_none()
+    }));
     server.abort();
 }
 
@@ -143,6 +195,7 @@ async fn pre_cancelled_upload_stops_before_the_first_chunk() {
     let state = UploadState {
         upload_url: format!("http://{address}/upload"),
         upload_requests: Arc::new(AtomicUsize::new(0)),
+        upload_telemetry: Arc::new(Mutex::new(Vec::new())),
         chunks: Arc::new(Mutex::new(Vec::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -184,6 +237,7 @@ async fn rejects_empty_and_oversized_uploads_before_requesting_an_upload_url() {
     let state = UploadState {
         upload_url: format!("http://{address}/upload"),
         upload_requests: Arc::new(AtomicUsize::new(0)),
+        upload_telemetry: Arc::new(Mutex::new(Vec::new())),
         chunks: Arc::new(Mutex::new(Vec::new())),
         attempts: Arc::new(Mutex::new(HashMap::new())),
     };

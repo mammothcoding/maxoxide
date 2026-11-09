@@ -15,7 +15,7 @@ git checkout "v<version>"
 cargo run --example live_api_test
 ```
 
-Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v3.1.0` for version `3.1.0`. To exercise unreleased code from the default branch, omit `git checkout`.
+Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v4.0.0` for version `4.0.0`. To exercise unreleased code from the default branch, omit `git checkout`.
 
 Rust 1.85 or newer is required.
 
@@ -64,9 +64,9 @@ The example checks or offers interactive checks for:
 - channel lookup by public link;
 - chat- and user-addressed text, Markdown, structured messages, and link-preview options;
 - keyboards, callbacks, message buttons, contact/location requests, clipboard, Mini App, and chat buttons;
-- message retrieval, editing, and deletion;
+- message retrieval through current `before`/`after` pagination and by ID, editing, and deletion;
 - comment listing and optional confirmed creation, retrieval, editing, and deletion;
-- upload URLs, streamed file/byte uploads, and optional image/video/audio send helpers;
+- upload URLs, streamed file/byte uploads, optional image/video/audio send helpers, and the returned `video_type` for a regular video upload;
 - webhook subscriptions and optional temporary command-menu replacement;
 - optional group metadata, members, administrators, sender actions, pinning, title rollback, leaving, and deletion.
 

@@ -8,9 +8,9 @@ use crate::{
     types::{
         AnswerCallbackBody, Attachment, AttachmentKind, BotInfo, Button, Callback, Chat,
         ChatAdminPermission, ChatMember, ChatStatus, ChatType, ContactAttachmentPayload,
-        KeyboardPayload, MarkupElement, Message, MessageBody, MessageFormat, NewAttachment,
-        NewCommentBody, NewMessageBody, PhotoToken, Recipient, SenderAction,
-        ShareAttachmentPayload, SubscribeBody, Update, UploadType, User,
+        KeyboardPayload, MarkupElement, MediaAttachmentPayload, Message, MessageBody,
+        MessageFormat, NewAttachment, NewCommentBody, NewMessageBody, PhotoToken, Recipient,
+        SenderAction, ShareAttachmentPayload, SubscribeBody, Update, UploadType, User, VideoType,
     },
 };
 use std::{collections::BTreeMap, time::Duration};
@@ -188,37 +188,38 @@ fn test_comment_updates_roundtrip_and_expose_common_fields() {
 }
 
 #[test]
-fn test_bot_admin_permissions_changed_roundtrip() {
-    let update: Update = serde_json::from_value(serde_json::json!({
-        "update_type": "bot_admin_permissions_changed",
-        "timestamp": 1_700_000_004,
-        "chat_id": -42,
-        "user_id": 7,
-        "bot_id": 8,
-        "is_channel": true,
-        "is_admin": true,
-        "permissions": ["read_all_messages", "future_permission"]
-    }))
+fn test_bot_admin_permissions_changed_fixture() {
+    let update: Update = serde_json::from_str(include_str!(
+        "../tests/fixture_bot_admin_permissions_changed.json"
+    ))
     .unwrap();
 
     assert_eq!(update.update_type(), Some("bot_admin_permissions_changed"));
     assert_eq!(update.timestamp(), Some(1_700_000_004));
     assert_eq!(update.chat_id(), Some(-42));
     assert!(Filter::bot_admin_permissions_changed().matches(&update));
-    assert!(matches!(
-        update,
-        Update::BotAdminPermissionsChanged {
-            user_id: 7,
-            bot_id: 8,
-            is_channel: true,
-            is_admin: true,
-            permissions: Some(permissions),
-            ..
-        } if permissions == [
+    let Update::BotAdminPermissionsChanged {
+        user_id: 7,
+        bot_id: 8,
+        is_channel: true,
+        is_admin: true,
+        permissions: Some(permissions),
+        ..
+    } = &update
+    else {
+        panic!("fixture should deserialize as BotAdminPermissionsChanged");
+    };
+    assert_eq!(
+        permissions,
+        &[
             ChatAdminPermission::ReadAllMessages,
             ChatAdminPermission::Unknown("future_permission".into())
         ]
-    ));
+    );
+
+    let permissions_json = serde_json::to_string(permissions).unwrap();
+    let restored: Vec<ChatAdminPermission> = serde_json::from_str(&permissions_json).unwrap();
+    assert_eq!(restored, *permissions);
 }
 
 #[test]
@@ -692,6 +693,7 @@ fn test_new_message_body_attachment_and_link_builders() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_answer_callback_body_defaults() {
     let body = AnswerCallbackBody {
         callback_id: "cb_123".into(),
@@ -858,6 +860,116 @@ fn test_attachment_image_deserialization() {
     let json = r#"{"type":"image","payload":{"url":"https://cdn.example.com/photo.jpg","token":"tok123"}}"#;
     let att: Attachment = serde_json::from_str(json).unwrap();
     assert!(matches!(att, Attachment::Image { .. }));
+}
+
+#[test]
+fn test_video_attachment_round_trip_preserves_video_type() {
+    let original = serde_json::json!({
+        "type": "video",
+        "payload": {
+            "url": "https://cdn.example.com/video.mp4",
+            "token": "video-token",
+            "future_payload_field": 7
+        },
+        "thumbnail": {"url": "https://cdn.example.com/thumbnail.jpg"},
+        "width": 720,
+        "height": 720,
+        "duration": 15,
+        "video_type": "video_message"
+    });
+    let attachment: Attachment = serde_json::from_value(original.clone()).unwrap();
+
+    let Attachment::Video {
+        payload,
+        thumbnail,
+        width,
+        height,
+        duration,
+        video_type,
+        ..
+    } = &attachment
+    else {
+        panic!("video fixture should deserialize as Attachment::Video");
+    };
+    assert_eq!(payload.token.as_deref(), Some("video-token"));
+    assert_eq!(payload.extra["future_payload_field"], 7);
+    assert_eq!(
+        thumbnail
+            .as_ref()
+            .and_then(|thumbnail| thumbnail.url.as_deref()),
+        Some("https://cdn.example.com/thumbnail.jpg")
+    );
+    assert_eq!(*width, Some(720));
+    assert_eq!(*height, Some(720));
+    assert_eq!(*duration, Some(15));
+    assert_eq!(video_type.as_ref(), Some(&VideoType::VideoMessage));
+    assert_eq!(serde_json::to_value(attachment).unwrap(), original);
+}
+
+#[test]
+fn test_media_attachments_accept_legacy_nested_metadata() {
+    let video: Attachment = serde_json::from_value(serde_json::json!({
+        "type": "video",
+        "payload": {
+            "url": "https://cdn.example.com/video.mp4",
+            "token": "video-token",
+            "thumbnail": {"url": "https://cdn.example.com/legacy-thumbnail.jpg"},
+            "duration": 12,
+            "width": 640,
+            "height": 480,
+            "video_type": "video"
+        }
+    }))
+    .unwrap();
+    let video_json = serde_json::to_value(video).unwrap();
+    assert_eq!(video_json["duration"], 12);
+    assert_eq!(video_json["width"], 640);
+    assert_eq!(video_json["height"], 480);
+    assert_eq!(video_json["video_type"], "video");
+    assert_eq!(
+        video_json["thumbnail"]["url"],
+        "https://cdn.example.com/legacy-thumbnail.jpg"
+    );
+    assert!(video_json["payload"].get("duration").is_none());
+
+    let audio: Attachment = serde_json::from_value(serde_json::json!({
+        "type": "audio",
+        "payload": {
+            "token": "audio-token",
+            "transcription": "Recognized speech"
+        }
+    }))
+    .unwrap();
+    let audio_json = serde_json::to_value(audio).unwrap();
+    assert_eq!(audio_json["transcription"], "Recognized speech");
+    assert!(audio_json["payload"].get("transcription").is_none());
+}
+
+#[test]
+fn test_unknown_video_type_round_trip() {
+    let payload = MediaAttachmentPayload {
+        token: Some("video-token".into()),
+        ..Default::default()
+    };
+    let attachment = Attachment::Video {
+        payload,
+        thumbnail: None,
+        width: None,
+        height: None,
+        duration: None,
+        video_type: Some(VideoType::Unknown("future_video".into())),
+    };
+    let value = serde_json::to_value(attachment).unwrap();
+    let restored: Attachment = serde_json::from_value(value.clone()).unwrap();
+
+    assert_eq!(value["video_type"], "future_video");
+    assert!(matches!(
+        restored,
+        Attachment::Video {
+            video_type: Some(VideoType::Unknown(value)),
+            ..
+        } if value == "future_video"
+    ));
 }
 
 #[test]

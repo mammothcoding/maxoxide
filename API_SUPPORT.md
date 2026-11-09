@@ -2,7 +2,7 @@
 
 ## English
 
-The table summarizes MAX API support in maxoxide 3.1.
+The table summarizes MAX API support in maxoxide 4.0.
 
 Support statuses are based on the public MAX API documentation and the public
 contracts of the official Go and TypeScript SDKs. Experimental and partner-only
@@ -15,8 +15,8 @@ areas are identified explicitly.
 | `GET /chats` | Removed | MAX no longer supports it; persist IDs from updates |
 | Chat by ID/link, edit, delete, actions | Typed | Link variants are safely path-encoded |
 | Pin and membership/admin methods | Typed | Includes `view_stats` and unknown permissions; `add_members` is deprecated after endpoint removal |
-| Send/edit/delete/get messages | Typed | Chat/user addressing, validation, reply/forward |
-| Callback answers | Typed | Structured notification/message body and `disable_link_preview` query option |
+| Send/edit/delete/get messages | Typed | Chat/user addressing, validation, reply/forward, and `before`/`after` pagination; legacy `from`/`to` signatures remain available |
+| Callback answers | Typed | Replacement message and `disable_link_preview`; legacy `notification` remains wire-compatible but is deprecated |
 | Subscriptions and long polling | Typed | Webhook recommended for production |
 | Upload URL | Typed with preflight | Decimal limits: image 50 MB, video 250 MB, audio 256 MB, file 4 GB |
 | Multipart upload | Streaming | File is not fully buffered |
@@ -26,7 +26,8 @@ areas are identified explicitly.
 | Administrator permission update | Typed webhook event | Includes bot/user IDs, channel/admin flags, and permissions |
 | Constructed-message updates | Typed SDK extension | Confirmed by the official TypeScript SDK |
 | `bot_stopped.payload` | Typed SDK extension | Confirmed by the official TypeScript SDK |
-| Incoming/outgoing attachments | Typed with unknown preservation | Image, video, audio, file, sticker, contact, location, share, keyboard |
+| Incoming/outgoing attachments | Typed with unknown preservation | Image photos, top-level video/audio metadata, `VideoType`, file, sticker, contact, location, share, keyboard |
+| Client identification | Enabled with opt-out | `X-Max-Client-Name`, `X-Max-Client-Version`, and `X-Max-Client-Runtime` only on Bot API requests |
 | Mini App init data | Stable validator | HMAC, duplicates, freshness, typed user/chat |
 | Mini App contact | Stable validator | Signature/phone normalization; caller controls freshness |
 | Digital ID | Experimental partner integration | Not verified against the live service; validate endpoint, authorization, and partner-owned models against onboarding docs before production |
@@ -38,6 +39,7 @@ areas are identified explicitly.
 - Unknown update types retain raw JSON.
 - A malformed known update falls back to `Update::Unknown` instead of losing delivery.
 - Typed request methods validate documented limits before I/O.
+- Incoming 3.x video/audio metadata nested in `payload` remains readable, while serialization uses the current top-level shape.
 - A removed endpoint may retain a deprecated signature for a compatible release, but calls can still fail at the platform boundary.
 
 ### Comments
@@ -54,7 +56,7 @@ Comment events are also represented by `Update::CommentCreated`, `Update::Commen
 
 ## Русский
 
-В таблице приведена поддержка MAX API в maxoxide 3.1.
+В таблице приведена поддержка MAX API в maxoxide 4.0.
 
 Статусы основаны на публичной документации MAX API и открытых контрактах
 официальных SDK для Go и TypeScript. Экспериментальные и доступные только партнёрам
@@ -67,8 +69,8 @@ Comment events are also represented by `Update::CommentCreated`, `Update::Commen
 | `GET /chats` | Удалено | MAX больше не поддерживает метод; сохраняйте идентификаторы из обновлений |
 | Получение чата по ID/ссылке, изменение, удаление, действия | Типизировано | Варианты ссылок безопасно кодируются как сегменты пути |
 | Закрепление сообщений, участники и администраторы | Типизировано | Включает `view_stats` и сохранение неизвестных разрешений; `add_members` устарел после удаления endpoint |
-| Отправка, изменение, удаление и получение сообщений | Типизировано | Адресация по чату/пользователю, валидация, ответ на исходное сообщение и пересылка |
-| Ответы на callback-запросы | Типизировано | Структурированное тело уведомления или сообщения и query-параметр `disable_link_preview` |
+| Отправка, изменение, удаление и получение сообщений | Типизировано | Адресация по чату/пользователю, валидация, ответ, пересылка и пагинация `before`/`after`; прежние сигнатуры `from`/`to` сохранены |
+| Ответы на callback-запросы | Типизировано | Заменяющее сообщение и `disable_link_preview`; прежнее поле `notification` совместимо с протоколом, но помечено устаревшим |
 | Подписки и длительный опрос | Типизировано | Для рабочего окружения рекомендуется webhook |
 | Получение URL для загрузки | Типизировано с предварительной проверкой | Десятичные лимиты: image 50 MB, video 250 MB, audio 256 MB, file 4 GB |
 | Multipart-загрузка | Потоковая загрузка | Файл не буферизуется целиком |
@@ -78,7 +80,8 @@ Comment events are also represented by `Update::CommentCreated`, `Update::Commen
 | Update прав администратора | Типизированное webhook-событие | Содержит ID бота и пользователя, признаки канала и администратора, а также разрешения |
 | Обновления `message_construction_request` и `message_constructed` | Типизированное расширение SDK | Подтверждено официальным SDK для TypeScript |
 | `bot_stopped.payload` | Типизированное расширение SDK | Подтверждено официальным SDK для TypeScript |
-| Входящие и исходящие вложения | Типизировано с сохранением неизвестных значений | `image`, `video`, `audio`, `file`, `sticker`, `contact`, `location`, `share`, `keyboard` |
+| Входящие и исходящие вложения | Типизировано с сохранением неизвестных значений | Фотографии, верхнеуровневые метаданные видео и аудио, `VideoType`, `file`, `sticker`, `contact`, `location`, `share`, `keyboard` |
+| Идентификация клиента | Включена с возможностью отключения | `X-Max-Client-Name`, `X-Max-Client-Version` и `X-Max-Client-Runtime` только в запросах Bot API |
 | Начальные данные Mini App | Стабильный валидатор | HMAC, дубликаты, срок действия, типизированные пользователь и чат |
 | Контакт Mini App | Стабильный валидатор | Нормализация подписи и телефона; срок действия контролирует вызывающий код |
 | Digital ID | Экспериментальная партнёрская интеграция | Не проверена на реальном сервисе; перед рабочим использованием сверьте endpoint, формат авторизации и модели партнёра с документацией подключения |
@@ -90,6 +93,7 @@ Comment events are also represented by `Update::CommentCreated`, `Update::Commen
 - Неизвестные типы обновлений сохраняют исходный JSON.
 - Некорректное известное обновление преобразуется в `Update::Unknown`, чтобы не потерять доставленное событие.
 - Типизированные методы запросов проверяют документированные ограничения до сетевого вызова.
+- Вложенные в `payload` метаданные видео и аудио из 3.x по-прежнему читаются, а сериализация использует актуальную верхнеуровневую форму.
 - Для удалённого endpoint совместимая сигнатура может временно сохраняться как устаревшая, но вызов всё равно может завершиться ошибкой платформы.
 
 ### Комментарии

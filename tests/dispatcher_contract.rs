@@ -153,16 +153,7 @@ async fn dispatches_comment_and_admin_permission_handlers() {
             "chat_id": -42,
             "post_id": "post-1"
         }),
-        serde_json::json!({
-            "update_type": "bot_admin_permissions_changed",
-            "timestamp": 1004,
-            "chat_id": -42,
-            "user_id": 7,
-            "bot_id": 8,
-            "is_channel": true,
-            "is_admin": true,
-            "permissions": ["read_all_messages"]
-        }),
+        serde_json::from_str(include_str!("fixture_bot_admin_permissions_changed.json")).unwrap(),
     ];
 
     for value in updates {

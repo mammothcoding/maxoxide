@@ -1,4 +1,7 @@
-use reqwest::{Certificate, Client, Method, Proxy};
+use reqwest::{
+    Certificate, Client, Method, Proxy,
+    header::{HeaderMap, HeaderValue},
+};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +17,9 @@ pub const DEFAULT_BASE_URL: &str = "https://platform-api2.max.ru";
 const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
+const CLIENT_NAME_HEADER: &str = "x-max-client-name";
+const CLIENT_VERSION_HEADER: &str = "x-max-client-version";
+const CLIENT_RUNTIME_HEADER: &str = "x-max-client-runtime";
 const RUSSIAN_TRUSTED_ROOT_CA_PEM: &[u8] = include_bytes!("certs/russian_trusted_root_ca.pem");
 
 fn embedded_russian_trusted_root_ca() -> std::result::Result<Vec<Certificate>, reqwest::Error> {
@@ -99,6 +105,49 @@ impl Default for RetryPolicy {
     }
 }
 
+struct ClientTelemetry {
+    name: String,
+    version: String,
+    runtime: String,
+}
+
+impl ClientTelemetry {
+    fn maxoxide() -> Self {
+        Self {
+            name: "maxoxide".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            runtime: format!("rust/{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        }
+    }
+
+    fn into_headers(self) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CLIENT_NAME_HEADER,
+            telemetry_header_value("client telemetry name", &self.name)?,
+        );
+        headers.insert(
+            CLIENT_VERSION_HEADER,
+            telemetry_header_value("client telemetry version", &self.version)?,
+        );
+        headers.insert(
+            CLIENT_RUNTIME_HEADER,
+            telemetry_header_value("client telemetry runtime", &self.runtime)?,
+        );
+        Ok(headers)
+    }
+}
+
+fn telemetry_header_value(field: &str, value: &str) -> Result<HeaderValue> {
+    if value.trim().is_empty() {
+        return Err(MaxError::Configuration(format!("{field} is empty")));
+    }
+
+    HeaderValue::from_str(value).map_err(|error| {
+        MaxError::Configuration(format!("{field} cannot be used as an HTTP header: {error}"))
+    })
+}
+
 /// Builder for a production MAX Bot API client.
 pub struct BotBuilder {
     token: String,
@@ -111,6 +160,7 @@ pub struct BotBuilder {
     client: Option<Client>,
     rate_limits: RateLimitConfig,
     retry_policy: RetryPolicy,
+    telemetry: Option<ClientTelemetry>,
 }
 
 impl BotBuilder {
@@ -127,6 +177,7 @@ impl BotBuilder {
             client: None,
             rate_limits: RateLimitConfig::default(),
             retry_policy: RetryPolicy::default(),
+            telemetry: Some(ClientTelemetry::maxoxide()),
         }
     }
 
@@ -203,6 +254,33 @@ impl BotBuilder {
         self
     }
 
+    /// Overrides the diagnostic `X-Max-Client-*` header values.
+    ///
+    /// These headers are added only to Bot API requests. Binary data is sent
+    /// to signed upload URLs without them.
+    pub fn client_telemetry(
+        mut self,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        runtime: impl Into<String>,
+    ) -> Self {
+        self.telemetry = Some(ClientTelemetry {
+            name: name.into(),
+            version: version.into(),
+            runtime: runtime.into(),
+        });
+        self
+    }
+
+    /// Disables the `X-Max-Client-*` headers added by maxoxide.
+    ///
+    /// This cannot remove same-named default headers from a prebuilt
+    /// [`reqwest::Client`] supplied through [`Self::http_client`].
+    pub fn disable_client_telemetry(mut self) -> Self {
+        self.telemetry = None;
+        self
+    }
+
     /// Configures global and recipient-specific limits.
     pub fn rate_limits(mut self, rate_limits: RateLimitConfig) -> Self {
         self.rate_limits = rate_limits;
@@ -271,6 +349,11 @@ impl BotBuilder {
             ));
         }
 
+        let telemetry_headers = match self.telemetry {
+            Some(telemetry) => telemetry.into_headers()?,
+            None => HeaderMap::new(),
+        };
+
         let client = match self.client {
             Some(client) => client,
             None => {
@@ -295,6 +378,7 @@ impl BotBuilder {
                 upload_timeout: self.upload_timeout,
                 rate_limiters: RateLimiters::new(self.rate_limits),
                 retry_policy: self.retry_policy,
+                telemetry_headers,
             }),
         })
     }
@@ -329,6 +413,7 @@ struct BotInner {
     upload_timeout: Duration,
     rate_limiters: RateLimiters,
     retry_policy: RetryPolicy,
+    telemetry_headers: HeaderMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +464,49 @@ fn append_update_query(
     }
     if let Some(l) = limit {
         params.push(("limit", l.to_string()));
+    }
+}
+
+fn validate_messages_page(
+    count: Option<u32>,
+    before: Option<i64>,
+    after: Option<i64>,
+) -> Result<()> {
+    if count.is_some_and(|count| !(1..=100).contains(&count)) {
+        return Err(ValidationError::new("count", "must be between 1 and 100").into());
+    }
+    if before.is_some_and(|before| before < 0) {
+        return Err(ValidationError::new("before", "must not be negative").into());
+    }
+    if after.is_some_and(|after| after < 0) {
+        return Err(ValidationError::new("after", "must not be negative").into());
+    }
+
+    Ok(())
+}
+
+fn append_messages_page(
+    params: &mut Vec<(&'static str, String)>,
+    count: Option<u32>,
+    from: Option<i64>,
+    to: Option<i64>,
+    before: Option<i64>,
+    after: Option<i64>,
+) {
+    if let Some(count) = count {
+        params.push(("count", count.to_string()));
+    }
+    if let Some(from) = from {
+        params.push(("from", from.to_string()));
+    }
+    if let Some(to) = to {
+        params.push(("to", to.to_string()));
+    }
+    if let Some(before) = before {
+        params.push(("before", before.to_string()));
+    }
+    if let Some(after) = after {
+        params.push(("after", after.to_string()));
     }
 }
 
@@ -697,6 +825,7 @@ impl Bot {
                 .await?
                 .request(method.clone(), self.url(path))
                 .header("Authorization", self.auth())
+                .headers(self.inner.telemetry_headers.clone())
                 .query(query);
             if let Some(body) = &body {
                 request = request.json(body);
@@ -1030,7 +1159,9 @@ impl Bot {
         .await
     }
 
-    /// GET /messages — Get messages from a chat.
+    /// GET /messages - Gets chat messages using the deprecated `from` and `to` parameters.
+    ///
+    /// New integrations should use [`Self::get_messages_with_options`].
     pub async fn get_messages(
         &self,
         chat_id: i64,
@@ -1038,20 +1169,15 @@ impl Bot {
         from: Option<i64>,
         to: Option<i64>,
     ) -> Result<MessageList> {
-        let mut params: Vec<(&str, String)> = vec![("chat_id", chat_id.to_string())];
-        if let Some(c) = count {
-            params.push(("count", c.to_string()));
-        }
-        if let Some(f) = from {
-            params.push(("from", f.to_string()));
-        }
-        if let Some(t) = to {
-            params.push(("to", t.to_string()));
-        }
+        validate_messages_page(count, None, None)?;
+        let mut params = vec![("chat_id", chat_id.to_string())];
+        append_messages_page(&mut params, count, from, to, None, None);
         self.get_with_query("/messages", &params).await
     }
 
-    /// GET /messages — Get one or more messages by IDs.
+    /// GET /messages - Gets messages by ID using the deprecated `from` and `to` parameters.
+    ///
+    /// New integrations should use [`Self::get_messages_by_ids_with_options`].
     pub async fn get_messages_by_ids(
         &self,
         message_ids: impl IntoIterator<Item = impl Into<String>>,
@@ -1059,17 +1185,47 @@ impl Bot {
         from: Option<i64>,
         to: Option<i64>,
     ) -> Result<MessageList> {
-        let mut params: Vec<(&str, String)> =
-            vec![("message_ids", comma_join_strings(message_ids))];
-        if let Some(c) = count {
-            params.push(("count", c.to_string()));
-        }
-        if let Some(f) = from {
-            params.push(("from", f.to_string()));
-        }
-        if let Some(t) = to {
-            params.push(("to", t.to_string()));
-        }
+        validate_messages_page(count, None, None)?;
+        let mut params = vec![("message_ids", comma_join_strings(message_ids))];
+        append_messages_page(&mut params, count, from, to, None, None);
+        self.get_with_query("/messages", &params).await
+    }
+
+    /// GET /messages - Gets a page of chat messages using `before` and `after`.
+    pub async fn get_messages_with_options(
+        &self,
+        chat_id: i64,
+        options: GetMessagesOptions,
+    ) -> Result<MessageList> {
+        validate_messages_page(options.count, options.before, options.after)?;
+        let mut params = vec![("chat_id", chat_id.to_string())];
+        append_messages_page(
+            &mut params,
+            options.count,
+            None,
+            None,
+            options.before,
+            options.after,
+        );
+        self.get_with_query("/messages", &params).await
+    }
+
+    /// GET /messages - Gets messages by ID with the current pagination parameters.
+    pub async fn get_messages_by_ids_with_options(
+        &self,
+        message_ids: impl IntoIterator<Item = impl Into<String>>,
+        options: GetMessagesOptions,
+    ) -> Result<MessageList> {
+        validate_messages_page(options.count, options.before, options.after)?;
+        let mut params = vec![("message_ids", comma_join_strings(message_ids))];
+        append_messages_page(
+            &mut params,
+            options.count,
+            None,
+            None,
+            options.before,
+            options.after,
+        );
         self.get_with_query("/messages", &params).await
     }
 
@@ -1084,7 +1240,7 @@ impl Bot {
             .await
     }
 
-    /// Отвечает на callback с дополнительными query-параметрами.
+    /// Answers a callback with additional query parameters.
     pub async fn answer_callback_with_options(
         &self,
         body: AnswerCallbackBody,
@@ -1098,23 +1254,30 @@ impl Bot {
             notification: Option<String>,
         }
 
-        if let Some(message) = &body.message {
+        #[allow(deprecated)]
+        let AnswerCallbackBody {
+            callback_id,
+            message,
+            notification,
+        } = body;
+
+        if let Some(message) = &message {
             message.validate()?;
         }
         self.acquire_message_limit(
             MessageOperation::Callback,
-            RateLimitKey::Custom(body.callback_id.clone()),
+            RateLimitKey::Custom(callback_id.clone()),
         )
         .await;
-        let mut query = vec![("callback_id", body.callback_id)];
+        let mut query = vec![("callback_id", callback_id)];
         if let Some(disable_link_preview) = options.disable_link_preview {
             query.push(("disable_link_preview", disable_link_preview.to_string()));
         }
         self.post_with_query(
             "/answers",
             &AnswerBody {
-                message: body.message,
-                notification: body.notification,
+                message,
+                notification,
             },
             &query,
         )
@@ -1127,7 +1290,7 @@ impl Bot {
 
     /// GET /messages/{messageId}/comments — Get comments for a channel post.
     ///
-    /// Бот должен быть администратором канала с правом `read_all_messages`.
+    /// The bot must be a channel administrator with the `read_all_messages` permission.
     pub async fn get_comments(
         &self,
         message_id: &str,

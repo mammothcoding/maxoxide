@@ -13,6 +13,42 @@ bot.send_text_to_user(user_id, "Отправить по глобальному u
 
 Для заменяющего сообщения при ответе на callback используйте `answer_callback_with_options` и `AnswerCallbackOptions::disable_link_preview`. Флаг передаётся как query-параметр `POST /answers`, а не в JSON body.
 
+Поле `AnswerCallbackBody::notification` сохранено только для совместимости со старым форматом протокола и помечено устаревшим в 4.0. В новых интеграциях заменяйте связанное сообщение:
+
+```rust
+use maxoxide::types::{AnswerCallbackBody, NewMessageBody};
+
+bot.answer_callback(AnswerCallbackBody {
+    callback_id,
+    message: Some(NewMessageBody::text("Подтверждено")),
+    ..Default::default()
+}).await?;
+```
+
+## Пагинация сообщений
+
+Для актуального контракта `before`/`after` используйте `GetMessagesOptions`. Метки времени Unix задаются в миллисекундах; `count` должен находиться от 1 до 100, а метки времени не могут быть отрицательными.
+
+```rust
+use maxoxide::types::GetMessagesOptions;
+
+let page = bot.get_messages_with_options(
+    chat_id,
+    GetMessagesOptions {
+        count: Some(50),
+        before: Some(before_timestamp),
+        after: None,
+    },
+).await?;
+
+let selected = bot.get_messages_by_ids_with_options(
+    [message_id],
+    GetMessagesOptions::default(),
+).await?;
+```
+
+Прежние сигнатуры `get_messages` и `get_messages_by_ids` сохраняют устаревшие параметры запроса MAX `from`/`to` для совместимости исходного кода. В новом коде используйте методы с параметрами.
+
 ## Форматирование и ссылки
 
 ```rust
@@ -31,6 +67,8 @@ bot.send_message_to_chat(
 `with_forward_from` создаёт forward-ссылку. Комментарии поддерживают только reply, поэтому `NewCommentBody::validate` отклоняет forward.
 
 MAX ограничивает текст сообщения/комментария 4000 Unicode-символами. Send/edit/callback/comment methods проверяют это до запроса. `send_long_text_to_chat` и `send_long_formatted_text_to_chat` делят строку по границе Unicode-символов и по порядку возвращают все отправленные `Message`.
+
+`NewMessageBody::with_notify(false)` отключает обычное push-уведомление в диалогах и групповых чатах. Для каналов MAX принимает только `true` или отсутствие поля. Точное отображение зависит от платформы, а maxoxide не определяет тип чата по одному `chat_id` и не отклоняет запрос локально.
 
 ## Клавиатуры
 
@@ -64,6 +102,34 @@ Validation проверяет 30 рядов, 7 кнопок в обычном р
 - inline keyboard.
 
 Проверка payload обнаруживает отсутствующий token/URL, пустой sticker code, некорректные координаты и клавиатуру. Для полученных вложений неизвестный будущий payload сохраняется.
+
+## Полученные медиа
+
+Полученные медиа соответствуют форме ответа MAX, а не форме исходящей загрузки:
+
+- `Attachment::Image` содержит `PhotoAttachmentPayload`, включая `photo_id`, размеры и неизвестные дополнительные поля;
+- `Attachment::Video` содержит `MediaAttachmentPayload`, а также верхнеуровневые `thumbnail`, размеры, длительность и необязательный `VideoType`;
+- `Attachment::Audio` содержит `MediaAttachmentPayload` и верхнеуровневую расшифровку речи;
+- `VideoType` различает обычное `video`, круглое видеосообщение `video_message` и неизвестные будущие значения.
+
+```rust
+use maxoxide::types::{Attachment, VideoType};
+
+match attachment {
+    Attachment::Video {
+        payload,
+        duration,
+        video_type,
+        ..
+    } => {
+        println!("token={:?}, duration={duration:?}", payload.token);
+        println!("type={:?}", video_type.as_ref().map(VideoType::as_str));
+    }
+    _ => {}
+}
+```
+
+Варианты медиа помечены `#[non_exhaustive]`, поэтому внешним шаблонам нужен `..`. Десериализация принимает старую форму 3.x, где метаданные видео и аудио находились внутри `payload`; сериализация создаёт каноническую верхнеуровневую форму. Неизвестные вложенные поля сохраняются в `MediaAttachmentPayload::extra`.
 
 ## Streaming upload
 

@@ -7,7 +7,7 @@ MAX Цифровой ID — отдельный партнёрский проду
 Включите client явно:
 
 ```toml
-maxoxide = { version = "3", features = ["digital-id"] }
+maxoxide = { version = "4", features = ["digital-id"] }
 ```
 
 ## Credentials и endpoint

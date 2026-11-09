@@ -30,7 +30,7 @@ Secret хранится только как SHA-256 digest. При ошибке 
 Включите `webhook-axum`:
 
 ```toml
-maxoxide = { version = "3", features = ["webhook-axum"] }
+maxoxide = { version = "4", features = ["webhook-axum"] }
 ```
 
 ```rust
@@ -50,7 +50,7 @@ Adapter добавляет body limit Axum как раннюю framework-защ�
 Включите `webhook-actix`:
 
 ```toml
-maxoxide = { version = "3", features = ["webhook-actix"] }
+maxoxide = { version = "4", features = ["webhook-actix"] }
 ```
 
 ```rust

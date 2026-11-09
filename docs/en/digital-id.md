@@ -7,7 +7,7 @@ MAX Digital ID is a separate partner product for eligible Russian legal entities
 Enable the client explicitly:
 
 ```toml
-maxoxide = { version = "3", features = ["digital-id"] }
+maxoxide = { version = "4", features = ["digital-id"] }
 ```
 
 ## Credentials and endpoint

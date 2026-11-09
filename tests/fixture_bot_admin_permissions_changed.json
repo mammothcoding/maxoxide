@@ -1,0 +1,10 @@
+{
+  "update_type": "bot_admin_permissions_changed",
+  "timestamp": 1700000004,
+  "chat_id": -42,
+  "user_id": 7,
+  "bot_id": 8,
+  "is_channel": true,
+  "is_admin": true,
+  "permissions": ["read_all_messages", "future_permission"]
+}

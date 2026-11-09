@@ -38,8 +38,8 @@
 use inquire::{Password, PasswordDisplayMode};
 use maxoxide::types::{
     AnswerCallbackBody, Attachment, BotCommand, Button, Chat, ChatAdmin, ChatAdminPermission,
-    ChatType, EditChatBody, GetCommentsOptions, KeyboardPayload, MarkupElement, Message,
-    MessageFormat, NewAttachment, NewCommentBody, NewMessageBody, PinMessageBody,
+    ChatType, EditChatBody, GetCommentsOptions, GetMessagesOptions, KeyboardPayload, MarkupElement,
+    Message, MessageFormat, NewAttachment, NewCommentBody, NewMessageBody, PinMessageBody,
     SendMessageOptions, SenderAction, SubscribeBody, Subscription, Update, UploadType,
 };
 use maxoxide::{Bot, MaxError};
@@ -718,6 +718,7 @@ async fn run_private_phase(
         ],
     };
     let keyboard_body = NewMessageBody::text(keyboard_text).with_keyboard(keyboard);
+    let callback_answer_message = keyboard_body.clone();
 
     let keyboard_message = harness
         .api_case(
@@ -1063,9 +1064,7 @@ async fn run_private_phase(
                     .api_case(report, "bot.answer_callback", move |bot| async move {
                         bot.answer_callback(AnswerCallbackBody {
                             callback_id,
-                            notification: Some(
-                                tr(lang, "Callback acknowledged.", "Callback подтверждён.").into(),
-                            ),
+                            message: Some(callback_answer_message),
                             ..Default::default()
                         })
                         .await
@@ -1656,19 +1655,67 @@ async fn run_private_phase(
             })
             .await;
 
+        let expected_message_id = plain_message.message_id().to_string();
+        let timestamp = plain_message.timestamp;
         let _ = harness
-            .api_case(report, "bot.get_messages", move |bot| async move {
-                bot.get_messages(private_chat_id, Some(20), None, None)
-                    .await
-            })
+            .api_case(
+                report,
+                "bot.get_messages_with_options",
+                move |bot| async move {
+                    let page = bot
+                        .get_messages_with_options(
+                            private_chat_id,
+                            GetMessagesOptions {
+                                count: Some(20),
+                                before: Some(timestamp.saturating_add(1)),
+                                after: Some(timestamp.saturating_sub(1)),
+                            },
+                        )
+                        .await?;
+                    if page
+                        .messages
+                        .iter()
+                        .any(|message| message.message_id() == expected_message_id)
+                    {
+                        Ok(page)
+                    } else {
+                        Err(MaxError::InvalidResponse(
+                            "paginated response did not contain the test message".into(),
+                        ))
+                    }
+                },
+            )
             .await;
 
         let message_id = plain_message.message_id().to_string();
+        let expected_message_id = message_id.clone();
         let _ = harness
-            .api_case(report, "bot.get_messages_by_ids", move |bot| async move {
-                bot.get_messages_by_ids([message_id], Some(1), None, None)
-                    .await
-            })
+            .api_case(
+                report,
+                "bot.get_messages_by_ids_with_options",
+                move |bot| async move {
+                    let page = bot
+                        .get_messages_by_ids_with_options(
+                            [message_id],
+                            GetMessagesOptions {
+                                count: Some(1),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    if page
+                        .messages
+                        .iter()
+                        .any(|message| message.message_id() == expected_message_id)
+                    {
+                        Ok(page)
+                    } else {
+                        Err(MaxError::InvalidResponse(
+                            "response by ID did not contain the test message".into(),
+                        ))
+                    }
+                },
+            )
             .await;
 
         let message_id = plain_message.message_id().to_string();
@@ -1683,8 +1730,8 @@ async fn run_private_phase(
             &[
                 "bot.edit_message",
                 "bot.get_message",
-                "bot.get_messages",
-                "bot.get_messages_by_ids",
+                "bot.get_messages_with_options",
+                "bot.get_messages_by_ids_with_options",
                 "bot.delete_message",
             ],
             tr(
@@ -2315,6 +2362,30 @@ async fn run_upload_phase(
                 .await;
 
             if let Some(video_message) = video_message {
+                print_case("wire.video_type(uploaded_video)");
+                match extract_video_type(&video_message) {
+                    Some("video") => {
+                        report.pass("wire.video_type(uploaded_video)", "video");
+                        println!("   PASS: video");
+                    }
+                    Some(video_type) => {
+                        let detail = format!(
+                            "expected `video` for a regular upload, received `{video_type}`"
+                        );
+                        report.fail("wire.video_type(uploaded_video)", detail.clone());
+                        println!("   FAIL: {detail}");
+                    }
+                    None => {
+                        let detail = tr(
+                            lang,
+                            "MAX did not return video_type for the uploaded video",
+                            "MAX не вернул video_type для загруженного видео",
+                        );
+                        report.skip("wire.video_type(uploaded_video)", detail);
+                        println!("   SKIP: {detail}");
+                    }
+                }
+
                 if let Some(video_token) = extract_video_token(&video_message) {
                     let _ = harness
                         .api_case(
@@ -2335,6 +2406,14 @@ async fn run_upload_phase(
                 }
             } else {
                 report.skip(
+                    "wire.video_type(uploaded_video)",
+                    tr(
+                        lang,
+                        "send_video_to_chat did not succeed",
+                        "send_video_to_chat не завершился успешно",
+                    ),
+                );
+                report.skip(
                     "bot.get_video(uploaded_video)",
                     tr(
                         lang,
@@ -2346,6 +2425,14 @@ async fn run_upload_phase(
         } else {
             report.skip(
                 "bot.send_video_to_chat",
+                tr(
+                    lang,
+                    "video path was not provided",
+                    "путь к видео не был указан",
+                ),
+            );
+            report.skip(
+                "wire.video_type(uploaded_video)",
                 tr(
                     lang,
                     "video path was not provided",
@@ -2398,6 +2485,7 @@ async fn run_upload_phase(
             &[
                 "bot.send_image_to_chat",
                 "bot.send_video_to_chat",
+                "wire.video_type(uploaded_video)",
                 "bot.get_video(uploaded_video)",
                 "bot.send_audio_to_chat",
             ],
@@ -4552,7 +4640,22 @@ fn extract_video_token(message: &Message) -> Option<String> {
         .as_ref()?
         .iter()
         .find_map(|attachment| match attachment {
-            Attachment::Video { payload } => payload.token.clone(),
+            Attachment::Video { payload, .. } => payload.token.clone(),
+            _ => None,
+        })
+}
+
+fn extract_video_type(message: &Message) -> Option<&str> {
+    message
+        .body
+        .attachments
+        .as_ref()?
+        .iter()
+        .find_map(|attachment| match attachment {
+            Attachment::Video {
+                video_type: Some(video_type),
+                ..
+            } => Some(video_type.as_str()),
             _ => None,
         })
 }
@@ -4797,9 +4900,7 @@ fn print_update_details(lang: Language, update: &Update) {
                         attachment_debug_name(attachment)
                     );
                     match attachment {
-                        Attachment::Image { payload }
-                        | Attachment::Video { payload }
-                        | Attachment::Audio { payload } => {
+                        Attachment::Image { payload, .. } => {
                             if payload.url.is_some() {
                                 println!("   attachment_url: <redacted>");
                             }
@@ -4809,6 +4910,48 @@ fn print_update_details(lang: Language, update: &Update) {
                             if let Some(photo_id) = payload.photo_id {
                                 println!("   photo_id: {photo_id}");
                             }
+                        }
+                        Attachment::Video {
+                            payload,
+                            thumbnail,
+                            width,
+                            height,
+                            duration,
+                            video_type,
+                            ..
+                        } => {
+                            if payload.url.is_some() {
+                                println!("   attachment_url: <redacted>");
+                            }
+                            if payload.token.is_some() {
+                                println!("   attachment_token: <redacted>");
+                            }
+                            println!("   thumbnail_present: {}", thumbnail.is_some());
+                            if let Some(width) = width {
+                                println!("   width: {width}");
+                            }
+                            if let Some(height) = height {
+                                println!("   height: {height}");
+                            }
+                            if let Some(duration) = duration {
+                                println!("   duration: {duration}");
+                            }
+                            if let Some(video_type) = video_type {
+                                println!("   video_type: {}", video_type.as_str());
+                            }
+                        }
+                        Attachment::Audio {
+                            payload,
+                            transcription,
+                            ..
+                        } => {
+                            if payload.url.is_some() {
+                                println!("   attachment_url: <redacted>");
+                            }
+                            if payload.token.is_some() {
+                                println!("   attachment_token: <redacted>");
+                            }
+                            println!("   transcription_present: {}", transcription.is_some());
                         }
                         Attachment::File { payload } => {
                             if payload.url.is_some() {

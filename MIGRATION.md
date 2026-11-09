@@ -1,6 +1,64 @@
-# Migrating to maxoxide 3.x
+# Migrating to maxoxide 4.0
 
 ## English
+
+### Migrating from 3.x to 4.0
+
+Version 4.0 corrects the received-media model and is therefore source-breaking for code that names `MediaPayload` or destructures image, video, or audio attachments. The minimum supported Rust version remains 1.85.
+
+Update the dependency first:
+
+```toml
+maxoxide = "4"
+```
+
+#### Received media
+
+`MediaPayload` was split according to the actual MAX response shape:
+
+- `Attachment::Image.payload` is now `PhotoAttachmentPayload`;
+- `Attachment::Video.payload` is now `MediaAttachmentPayload`, while `thumbnail`, `width`, `height`, `duration`, and `video_type` are fields of the variant;
+- `Attachment::Audio.payload` is now `MediaAttachmentPayload`, while `transcription` is a field of the variant;
+- `VideoType` represents `video`, `video_message`, and unknown future values;
+- the three media variants are non-exhaustive, so external patterns must contain `..`.
+
+Before:
+
+```rust
+if let Attachment::Video { payload } = attachment {
+    println!("duration={:?}", payload.duration);
+}
+```
+
+After:
+
+```rust
+if let Attachment::Video {
+    payload,
+    duration,
+    video_type,
+    ..
+} = attachment
+{
+    println!("token={:?}, duration={duration:?}", payload.token);
+    println!("type={:?}", video_type.as_ref().map(VideoType::as_str));
+}
+```
+
+The 4.0 deserializer still accepts the 3.x form with video/audio metadata nested inside `payload`. Serialization emits the canonical top-level form, and unknown nested fields are retained in `MediaAttachmentPayload::extra`.
+
+#### Message pages
+
+Use `get_messages_with_options` and `get_messages_by_ids_with_options` with `GetMessagesOptions` for the current `before`/`after` pagination contract. The 3.x methods remain available with their original `from`/`to` signatures, so this change is additive unless you choose to migrate.
+
+#### Client identification
+
+Bot API requests now send `X-Max-Client-Name`, `X-Max-Client-Version`, and `X-Max-Client-Runtime`. Override them with `BotBuilder::client_telemetry` or omit maxoxide-provided headers with `BotBuilder::disable_client_telemetry`. Signed URLs receive binary upload data without these headers.
+
+#### Callback and notification behavior
+
+- `AnswerCallbackBody::notification` is deprecated but remains serialized for wire compatibility. Prefer a replacement `message`.
+- `NewMessageBody::notify` keeps the same type and wire representation. Its documentation now records that channels accept only `true` or omission, while `false` is intended for dialogs and groups; maxoxide does not infer the chat type locally.
 
 ### Updating from 3.0 to 3.1
 
@@ -127,6 +185,64 @@ Create `WebhookService`, configure secret/limits once, then call `axum_adapter::
 - Comments were introduced as an experimental contract in 3.0 and became active in 3.1.
 
 ## Русский
+
+### Переход с 3.x на 4.0
+
+Версия 4.0 исправляет модель полученных медиа и поэтому несовместима на уровне исходного кода для приложений, которые называют `MediaPayload` либо разбирают варианты изображений, видео или аудио. Минимальная поддерживаемая версия Rust остаётся 1.85.
+
+Сначала обновите зависимость:
+
+```toml
+maxoxide = "4"
+```
+
+#### Полученные медиа
+
+`MediaPayload` разделён в соответствии с фактической формой ответа MAX:
+
+- `Attachment::Image.payload` теперь имеет тип `PhotoAttachmentPayload`;
+- `Attachment::Video.payload` теперь имеет тип `MediaAttachmentPayload`, а `thumbnail`, `width`, `height`, `duration` и `video_type` стали полями варианта;
+- `Attachment::Audio.payload` теперь имеет тип `MediaAttachmentPayload`, а `transcription` стало полем варианта;
+- `VideoType` представляет `video`, `video_message` и неизвестные будущие значения;
+- три варианта медиа помечены `#[non_exhaustive]`, поэтому внешние шаблоны должны содержать `..`.
+
+Было:
+
+```rust
+if let Attachment::Video { payload } = attachment {
+    println!("duration={:?}", payload.duration);
+}
+```
+
+Стало:
+
+```rust
+if let Attachment::Video {
+    payload,
+    duration,
+    video_type,
+    ..
+} = attachment
+{
+    println!("token={:?}, duration={duration:?}", payload.token);
+    println!("type={:?}", video_type.as_ref().map(VideoType::as_str));
+}
+```
+
+Десериализация 4.0 по-прежнему принимает форму 3.x с метаданными видео и аудио внутри `payload`. Сериализация создаёт каноническую верхнеуровневую форму, а неизвестные вложенные поля сохраняются в `MediaAttachmentPayload::extra`.
+
+#### Страницы сообщений
+
+Для актуальной пагинации `before`/`after` используйте `get_messages_with_options` и `get_messages_by_ids_with_options` с `GetMessagesOptions`. Методы 3.x остаются доступными с прежними сигнатурами `from`/`to`, поэтому переход необязателен для существующего кода.
+
+#### Идентификация клиента
+
+Запросы Bot API теперь отправляют `X-Max-Client-Name`, `X-Max-Client-Version` и `X-Max-Client-Runtime`. Переопределите их через `BotBuilder::client_telemetry` или не добавляйте заголовки maxoxide через `BotBuilder::disable_client_telemetry`. На подписанные URL, принимающие двоичные данные загрузки, эти заголовки не передаются.
+
+#### Callback и уведомления
+
+- `AnswerCallbackBody::notification` помечено устаревшим, но по-прежнему сериализуется для совместимости с протоколом. Предпочитайте заменяющее `message`.
+- Тип и представление `NewMessageBody::notify` не изменились. Документация теперь явно указывает, что каналы принимают только `true` или отсутствие поля, а `false` предназначено для диалогов и групп; maxoxide не определяет тип чата локально.
 
 ### Обновление с 3.0 до 3.1
 

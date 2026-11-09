@@ -30,7 +30,7 @@ The secret is stored only as SHA-256 digest. Failed checks are logged without th
 Enable `webhook-axum`:
 
 ```toml
-maxoxide = { version = "3", features = ["webhook-axum"] }
+maxoxide = { version = "4", features = ["webhook-axum"] }
 ```
 
 ```rust
@@ -50,7 +50,7 @@ The adapter adds Axum's body limit as an early framework guard and retains the c
 Enable `webhook-actix`:
 
 ```toml
-maxoxide = { version = "3", features = ["webhook-actix"] }
+maxoxide = { version = "4", features = ["webhook-actix"] }
 ```
 
 ```rust

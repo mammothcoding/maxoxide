@@ -38,6 +38,26 @@ let bot = Bot::builder("token")
 
 Zero timeouts and zero retry attempts are configuration errors. `RateLimitConfig::disabled()` is intended for deterministic mocks or a gateway that enforces the same limits itself, not for bypassing MAX production limits.
 
+## Client telemetry
+
+Every Bot API request includes diagnostic headers by default:
+
+- `X-Max-Client-Name: maxoxide`;
+- `X-Max-Client-Version: <crate version>`;
+- `X-Max-Client-Runtime: rust/<os>-<arch>`.
+
+They identify the SDK but contain no bot token, user data, request body, or machine identifier. The headers are also sent when obtaining an upload URL from `POST /uploads`, but never to the signed third-party URL that receives the binary data.
+
+A wrapper or internal distribution can override all three values:
+
+```rust
+let bot = Bot::builder("token")
+    .client_telemetry("company-max-sdk", "1.2.0", "rust/linux-x86_64")
+    .build()?;
+```
+
+To omit maxoxide-provided telemetry, call `.disable_client_telemetry()`. Empty values and values that cannot be encoded as HTTP headers fail during `build()`. Disabling telemetry cannot remove same-named default headers that were already configured in a prebuilt `reqwest::Client`.
+
 ## TLS
 
 Never use certificate-verification bypasses. MAX currently requires a Russian trust root that is not present in every operating-system trust store. The default client merges the certificate shipped with maxoxide.
@@ -54,7 +74,7 @@ let client = reqwest::Client::builder()
 let bot = Bot::with_client("token", client)?;
 ```
 
-`Bot::with_client` uses the client as-is. maxoxide cannot retroactively add proxy, connect timeout, or trust roots to a built client.
+`Bot::with_client` uses the transport configuration as-is. maxoxide cannot retroactively add proxy, connect timeout, or trust roots to a built client; request-level Bot API telemetry remains enabled unless explicitly disabled.
 
 ## Proxy
 

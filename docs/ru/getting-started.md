@@ -10,7 +10,7 @@
 
 ```toml
 [dependencies]
-maxoxide = "3"
+maxoxide = "4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 ```
 

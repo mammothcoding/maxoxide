@@ -6,13 +6,13 @@
 
 Ориентированный на production асинхронный Rust SDK для Bot API мессенджера [MAX](https://max.ru).
 
-[English README](README.md) | [Русские руководства](docs/ru/README.md) | [English guides](docs/en/README.md) | [Поддержка API](API_SUPPORT.md) | [Миграция на v3](MIGRATION.md)
+[English README](README.md) | [Русские руководства](docs/ru/README.md) | [English guides](docs/en/README.md) | [Поддержка API](API_SUPPORT.md) | [Миграция на v4](MIGRATION.md)
 
 ## Установка
 
 ```toml
 [dependencies]
-maxoxide = "3"
+maxoxide = "4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -61,8 +61,9 @@ MAX_BOT_TOKEN=... cargo run --example quickstart_bot
 ## Возможности
 
 - Типизированные сообщения, чаты, участники, callback, constructed-события, комментарии, подписки и загрузки.
+- Актуальная пагинация сообщений через `before`/`after`, типизированные метаданные видеосообщений и расширяемые данные медиа-вложений.
 - Структурированный `ApiError`: код MAX, ограниченное raw-тело для диагностики и `Retry-After`.
-- Безопасный builder: встроенный Russian Trusted Root CA, таймауты, HTTP/SOCKS proxy, retry и смена base URL.
+- Безопасный `BotBuilder`: встроенный Russian Trusted Root CA, настраиваемые тайм-ауты, HTTP/SOCKS-прокси, повторные попытки, смена базового URL и отключаемая телеметрия клиента.
 - Локальные лимиты 30 RPS и ограничения операций с сообщениями по получателю.
 - Multipart streaming без загрузки файла целиком и resumable `Content-Range`: retry чанка, progress и cancellation.
 - Точный разбор команд, составные фильтры, middleware, типизированный state, ограничение concurrency, задачи и graceful shutdown.

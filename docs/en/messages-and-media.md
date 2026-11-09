@@ -13,6 +13,42 @@ Use `SendMessageOptions::disable_link_preview` when the corresponding MAX query 
 
 For a replacement message sent while answering a callback, use `answer_callback_with_options` and `AnswerCallbackOptions::disable_link_preview`. The flag is encoded as a `POST /answers` query parameter, not in the JSON body.
 
+`AnswerCallbackBody::notification` remains available only for compatibility with older wire contracts and is deprecated in 4.0. Use a replacement `message` for current integrations:
+
+```rust
+use maxoxide::types::{AnswerCallbackBody, NewMessageBody};
+
+bot.answer_callback(AnswerCallbackBody {
+    callback_id,
+    message: Some(NewMessageBody::text("Confirmed")),
+    ..Default::default()
+}).await?;
+```
+
+## Message pagination
+
+Use `GetMessagesOptions` for the current `before`/`after` contract. Timestamps are Unix time in milliseconds; `count` must be between 1 and 100, and timestamps cannot be negative.
+
+```rust
+use maxoxide::types::GetMessagesOptions;
+
+let page = bot.get_messages_with_options(
+    chat_id,
+    GetMessagesOptions {
+        count: Some(50),
+        before: Some(before_timestamp),
+        after: None,
+    },
+).await?;
+
+let selected = bot.get_messages_by_ids_with_options(
+    [message_id],
+    GetMessagesOptions::default(),
+).await?;
+```
+
+The older `get_messages` and `get_messages_by_ids` signatures retain the deprecated MAX `from`/`to` query parameters for source compatibility. New code should use the options methods.
+
 ## Formatting and links
 
 ```rust
@@ -31,6 +67,8 @@ bot.send_message_to_chat(
 `with_forward_from` creates a forward link. Comments only support reply links, and `NewCommentBody::validate` rejects forwards.
 
 MAX limits message/comment text to 4000 Unicode characters. All send/edit/callback/comment methods validate this before making a request. `send_long_text_to_chat` and `send_long_formatted_text_to_chat` split at Unicode character boundaries and return every sent `Message` in order.
+
+`NewMessageBody::with_notify(false)` suppresses the normal push notification in dialogs and group chats. Channels accept only `true` or an omitted field. Exact presentation remains platform-dependent, and maxoxide does not infer the chat type from a `chat_id` or reject the request locally.
 
 ## Keyboards
 
@@ -64,6 +102,34 @@ Available button builders include callback, link, message, open app, clipboard, 
 - inline keyboard.
 
 Payload validation catches missing tokens/URLs, empty sticker codes, invalid coordinates, and invalid keyboards. Received attachment enums preserve unknown future payloads.
+
+## Received media
+
+Received media follows the MAX response shape rather than the outgoing upload shape:
+
+- `Attachment::Image` contains `PhotoAttachmentPayload`, including `photo_id`, dimensions, and unknown extra fields;
+- `Attachment::Video` contains `MediaAttachmentPayload` plus top-level `thumbnail`, dimensions, duration, and optional `VideoType`;
+- `Attachment::Audio` contains `MediaAttachmentPayload` plus top-level transcription;
+- `VideoType` distinguishes regular `video`, round `video_message`, and unknown future values.
+
+```rust
+use maxoxide::types::{Attachment, VideoType};
+
+match attachment {
+    Attachment::Video {
+        payload,
+        duration,
+        video_type,
+        ..
+    } => {
+        println!("token={:?}, duration={duration:?}", payload.token);
+        println!("type={:?}", video_type.as_ref().map(VideoType::as_str));
+    }
+    _ => {}
+}
+```
+
+The media variants are non-exhaustive, so external patterns need `..`. Deserialization accepts the old 3.x form where video/audio metadata was nested inside `payload`; serialization emits the canonical top-level form. Unknown nested media fields are preserved in `MediaAttachmentPayload::extra`.
 
 ## Streaming upload
 

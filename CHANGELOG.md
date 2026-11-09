@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.0] - 2026-11-09
+
+### EN
+
+#### Release summary
+
+This major release aligns received media with the current MAX wire shape and adds current message pagination and SDK identification headers.
+
+#### Breaking changes
+
+- Replaced the shared incoming `MediaPayload`. `Attachment::Image` now contains `PhotoAttachmentPayload`; video and audio use `MediaAttachmentPayload`, with media-specific metadata represented by fields on their variants.
+- Added top-level video `thumbnail`, dimensions, duration, and `video_type`, plus top-level audio transcription. Image, video, and audio variants are non-exhaustive, so external destructuring patterns need `..`.
+
+#### Added
+
+- Added forward-compatible `VideoType` values for regular videos, round video messages, and unknown future wire values. Unknown nested video/audio payload fields are preserved.
+- Added `GetMessagesOptions`, `get_messages_with_options`, and `get_messages_by_ids_with_options` for validated `before`/`after` pagination. Existing `from`/`to` methods retain their signatures.
+- Added default `X-Max-Client-Name`, `X-Max-Client-Version`, and `X-Max-Client-Runtime` headers, with builder methods to override or disable them. Signed binary upload requests do not receive these headers.
+
+#### Changed
+
+- Deserialization accepts both canonical top-level video/audio metadata and the legacy 3.x nested form; serialization emits the canonical shape.
+- Expanded the `NewMessageBody::notify` contract documentation for dialogs, groups, channels, and platform-dependent notification behavior.
+- Bumped the crate version to `4.0.0`.
+
+#### Deprecated
+
+- Deprecated `AnswerCallbackBody::notification`. It remains serializable for wire compatibility; current integrations should use `message`.
+
+### RU
+
+#### Кратко о релизе
+
+Этот мажорный релиз приводит полученные медиа к актуальной форме протокола MAX, а также добавляет современную пагинацию сообщений и заголовки идентификации SDK.
+
+#### Ломающие изменения
+
+- Удалён общий входящий `MediaPayload`. `Attachment::Image` теперь содержит `PhotoAttachmentPayload`, а видео и аудио используют `MediaAttachmentPayload`; специфичные метаданные вынесены в поля соответствующих вариантов.
+- Добавлены верхнеуровневые `thumbnail`, размеры, длительность и `video_type` видео, а также верхнеуровневая расшифровка аудио. Варианты изображения, видео и аудио помечены `#[non_exhaustive]`, поэтому внешним шаблонам нужен `..`.
+
+#### Добавлено
+
+- Добавлен расширяемый `VideoType` для обычного видео, круглого видеосообщения и неизвестных будущих значений протокола. Неизвестные вложенные поля видео и аудио сохраняются.
+- Добавлены `GetMessagesOptions`, `get_messages_with_options` и `get_messages_by_ids_with_options` для проверяемой пагинации `before`/`after`. Существующие методы `from`/`to` сохраняют свои сигнатуры.
+- Добавлены стандартные заголовки `X-Max-Client-Name`, `X-Max-Client-Version` и `X-Max-Client-Runtime` с методами переопределения и отключения. На подписанные запросы двоичной загрузки эти заголовки не передаются.
+
+#### Изменено
+
+- Десериализация принимает канонические верхнеуровневые метаданные видео и аудио и прежнюю вложенную форму 3.x; сериализация создаёт каноническую форму.
+- Расширено описание контракта `NewMessageBody::notify` для диалогов, групп, каналов и зависящего от платформы поведения уведомлений.
+- Версия крейта повышена до `4.0.0`.
+
+#### Устарело
+
+- Поле `AnswerCallbackBody::notification` помечено устаревшим. Оно по-прежнему сериализуется для совместимости с протоколом; в новых интеграциях используйте `message`.
+
 ## [3.1.0] - 2026-10-04
 
 ### EN

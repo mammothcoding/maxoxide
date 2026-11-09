@@ -16,7 +16,7 @@ These guides complement the API reference on docs.rs. Every English guide has an
 Additional reference documents:
 
 - [API support matrix](../../API_SUPPORT.md)
-- [v2 to v3 migration](../../MIGRATION.md)
+- [v3 to v4 migration](../../MIGRATION.md)
 - [Security policy and deployment guidance](../../SECURITY.md)
 - [Changelog](../../CHANGELOG.md)
 
