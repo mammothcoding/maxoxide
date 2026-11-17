@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [4.0.1] - 2026-11-17
+
+### EN
+
+#### Release summary
+
+This patch release rejects upload filenames that MAX would truncate or refuse, preserves webhook settings during live checks, and recognizes logical API failures returned with a successful HTTP status.
+
+#### Fixed
+
+- Bot API and upload responses with top-level `success: false` now return `MaxError::Api(ApiError)` even when the HTTP status is successful. The actual HTTP status, optional MAX code, message, and bounded raw response remain available.
+- Upload helpers reject filenames longer than 255 Unicode characters and multipart part headers larger than 512 bytes. This prevents MAX from silently truncating filenames or rejecting MIME-dependent UTF-8 filenames with `403 Forbidden`.
+
+#### Changed
+
+- Bumped the crate version to `4.0.1`.
+
+### RU
+
+#### Кратко о релизе
+
+Этот патч-релиз отклоняет имена загружаемых файлов, которые MAX обрезал бы или не принял, сохраняет параметры webhook во время live-проверок и распознаёт логические ошибки API при успешном HTTP status.
+
+#### Исправлено
+
+- Ответы Bot API и upload с верхнеуровневым `success: false` теперь возвращают `MaxError::Api(ApiError)` даже при успешном HTTP status. В ошибке сохраняются фактический HTTP status, необязательный код MAX, сообщение и ограниченное исходное тело ответа.
+- Upload-методы отклоняют имена длиннее 255 Unicode-символов и заголовки multipart-части размером больше 512 байт. Это предотвращает молчаливое обрезание имени в MAX и отказ `403 Forbidden` для зависящих от MIME имён в UTF-8.
+
+#### Изменено
+
+- Версия крейта повышена до `4.0.1`.
+
 ## [4.0.0] - 2026-11-09
 
 ### EN

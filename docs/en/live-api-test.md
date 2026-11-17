@@ -15,7 +15,7 @@ git checkout "v<version>"
 cargo run --example live_api_test
 ```
 
-Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v4.0.0` for version `4.0.0`. To exercise unreleased code from the default branch, omit `git checkout`.
+Replace `<version>` with the maxoxide version in your application; for example, use `git checkout v4.0.1` for version `4.0.1`. To exercise unreleased code from the default branch, omit `git checkout`.
 
 Rust 1.85 or newer is required.
 
@@ -40,7 +40,7 @@ If you provide credentials through the environment, load them through your usual
 
 At startup, select English or Russian and choose an update transport:
 
-- `long_polling`: checks typed, raw, and filtered polling. Active webhook subscriptions prevent long polling, so the example can temporarily unsubscribe them and restore them afterward.
+- `long_polling`: checks typed, raw, and filtered polling. Active webhook subscriptions prevent long polling, so the example can temporarily unsubscribe them and restore their captured URLs, API versions, and `update_types` afterward.
 - `webhook`: starts a minimal local HTTP receiver and consumes updates delivered by MAX. A public HTTPS URL must route to the prompted local listen address, directly or through a controlled reverse proxy/tunnel.
 
 The remaining prompts are optional unless the current scenario needs them:
@@ -85,7 +85,7 @@ The example asks before optional or destructive operations, but confirmed action
 - `delete_chat` and `leave_chat` are destructive and cannot be rolled back by maxoxide;
 - a chat button may create a real chat, after which the example asks whether to delete it, leave it, or keep it.
 
-The example restores captured command, webhook, and title state where possible and removes its generated temporary upload file. Restoration is best-effort: interruption, lost connectivity, insufficient permissions, or an API failure can leave state changed. Review the bot commands, webhook subscriptions, created chats, group membership, and test messages after every run.
+The example restores captured command, webhook, and title state where possible and removes its generated temporary upload file. Webhook restoration reuses each subscription's captured URL, API version, and `update_types`. Restoration is best-effort: interruption, lost connectivity, insufficient permissions, or an API failure can leave state changed. Review the bot commands, webhook subscriptions, created chats, group membership, and test messages after every run.
 
 MAX does not return webhook secrets from `get_subscriptions`. If an existing subscription uses a secret, provide the matching `MAX_WEBHOOK_SECRET` before allowing the example to disable it; otherwise an identical restoration cannot be guaranteed.
 

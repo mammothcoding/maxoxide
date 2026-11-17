@@ -1912,6 +1912,50 @@ async fn restore_disabled_webhooks(
             .await;
     }
 
+    let restored = harness
+        .api_case(
+            report,
+            "bot.get_subscriptions(post_poll_restore)",
+            |bot| async move { bot.get_subscriptions().await },
+        )
+        .await;
+    if let Some(restored) = restored {
+        let correctly_restored = disabled_subscriptions.iter().all(|disabled| {
+            restored
+                .subscriptions
+                .iter()
+                .any(|active| subscription_matches(active, disabled))
+        });
+        if correctly_restored {
+            report.pass(
+                "manual.webhook_restore_configuration",
+                tr(
+                    config.lang,
+                    "all disabled webhooks were restored with their original configuration",
+                    "все отключённые webhooks восстановлены с исходной конфигурацией",
+                ),
+            );
+        } else {
+            report.fail(
+                "manual.webhook_restore_configuration",
+                tr(
+                    config.lang,
+                    "one or more webhooks are missing or differ from their original configuration after restoration",
+                    "после восстановления один или несколько webhooks отсутствуют либо отличаются от исходной конфигурации",
+                ),
+            );
+        }
+    } else {
+        report.skip(
+            "manual.webhook_restore_configuration",
+            tr(
+                config.lang,
+                "restored webhook configuration could not be verified",
+                "не удалось проверить конфигурацию восстановленных webhooks",
+            ),
+        );
+    }
+
     Ok(())
 }
 
@@ -2059,6 +2103,7 @@ async fn cleanup_webhook_registration(
 
     if let Some(previous) = registration.previous.clone() {
         if removed {
+            let expected = previous.clone();
             let secret = config.webhook_secret.clone();
             let _ = harness
                 .api_case(
@@ -2075,6 +2120,37 @@ async fn cleanup_webhook_registration(
                     },
                 )
                 .await;
+            let restored = harness
+                .api_case(
+                    report,
+                    "bot.get_subscriptions(webhook_transport_restore)",
+                    |bot| async move { bot.get_subscriptions().await },
+                )
+                .await;
+            if restored.is_some_and(|subscriptions| {
+                subscriptions
+                    .subscriptions
+                    .iter()
+                    .any(|active| subscription_matches(active, &expected))
+            }) {
+                report.pass(
+                    "manual.webhook_transport_restore_configuration",
+                    tr(
+                        config.lang,
+                        "the previous webhook configuration was restored",
+                        "предыдущая конфигурация webhook восстановлена",
+                    ),
+                );
+            } else {
+                report.fail(
+                    "manual.webhook_transport_restore_configuration",
+                    tr(
+                        config.lang,
+                        "the previous webhook configuration is missing or differs after restoration",
+                        "после восстановления предыдущая конфигурация webhook отсутствует либо отличается",
+                    ),
+                );
+            }
         } else {
             report.skip(
                 "bot.subscribe(webhook_transport_restore)",
@@ -5364,6 +5440,25 @@ fn print_subscriptions(subscriptions: &[maxoxide::types::Subscription], lang: La
             "  - {} update_types={} version={:?}",
             subscription.url, update_types, subscription.version
         );
+    }
+}
+
+fn subscription_matches(active: &Subscription, expected: &Subscription) -> bool {
+    active.url == expected.url
+        && update_types_match(&active.update_types, &expected.update_types)
+        && active.version == expected.version
+}
+
+fn update_types_match(active: &Option<Vec<String>>, expected: &Option<Vec<String>>) -> bool {
+    match (active, expected) {
+        (None, None) => true,
+        (Some(active), Some(expected)) => {
+            active.len() == expected.len()
+                && active
+                    .iter()
+                    .all(|update_type| expected.contains(update_type))
+        }
+        _ => false,
     }
 }
 

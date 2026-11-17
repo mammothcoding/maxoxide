@@ -1,5 +1,5 @@
 use reqwest::{
-    Certificate, Client, Method, Proxy,
+    Certificate, Client, Method, Proxy, StatusCode,
     header::{HeaderMap, HeaderValue},
 };
 use serde::de::DeserializeOwned;
@@ -49,7 +49,6 @@ fn parse_success_payload<T: DeserializeOwned>(
     text: &str,
 ) -> std::result::Result<T, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(text)?;
-
     match serde_json::from_value::<T>(value.clone()) {
         Ok(parsed) => Ok(parsed),
         Err(original_error) => {
@@ -64,6 +63,56 @@ fn parse_success_payload<T: DeserializeOwned>(
             }
         }
     }
+}
+
+pub(crate) fn response_reports_failure(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
+        == Some(false)
+}
+
+pub(crate) fn api_error_from_response(
+    status: StatusCode,
+    text: String,
+    retry_after: Option<Duration>,
+) -> ApiError {
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok();
+    let code = value
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from);
+    let message = value
+        .as_ref()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| value.get("error").and_then(serde_json::Value::as_str))
+                .or_else(|| {
+                    value
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
+        .filter(|message| !message.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            if status.is_success() {
+                "MAX API reported success=false".into()
+            } else {
+                status
+                    .canonical_reason()
+                    .unwrap_or("MAX API request failed")
+                    .to_string()
+            }
+        });
+
+    ApiError::new(status.as_u16(), code, message)
+        .with_raw_response(text)
+        .with_retry_after(retry_after)
 }
 
 /// Retry policy for temporary MAX API and transport failures.
@@ -880,42 +929,10 @@ impl Bot {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         debug!(status = status.as_u16(), "MAX API response");
 
-        if status.is_success() {
+        if status.is_success() && !response_reports_failure(&text) {
             parse_success_payload(&text).map_err(MaxError::Json)
         } else {
-            let value = serde_json::from_str::<serde_json::Value>(&text).ok();
-            let code = value
-                .as_ref()
-                .and_then(|value| value.get("code"))
-                .and_then(serde_json::Value::as_str)
-                .map(String::from);
-            let message = value
-                .as_ref()
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .or_else(|| value.get("error").and_then(serde_json::Value::as_str))
-                        .or_else(|| {
-                            value
-                                .get("error")
-                                .and_then(|error| error.get("message"))
-                                .and_then(serde_json::Value::as_str)
-                        })
-                })
-                .filter(|message| !message.is_empty())
-                .map(String::from)
-                .unwrap_or_else(|| {
-                    status
-                        .canonical_reason()
-                        .unwrap_or("MAX API request failed")
-                        .to_string()
-                });
-
-            Err(ApiError::new(status.as_u16(), code, message)
-                .with_raw_response(text)
-                .with_retry_after(retry_after)
-                .into())
+            Err(api_error_from_response(status, text, retry_after).into())
         }
     }
 

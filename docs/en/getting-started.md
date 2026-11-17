@@ -94,7 +94,7 @@ match bot.get_me().await {
 }
 ```
 
-`ApiError::raw_response` contains at most 4 KiB and is not written to logs by the client. It is still application data: do not forward it to public logs without reviewing your own privacy policy.
+Responses with top-level `success: false` produce the same `MaxError::Api` even when MAX returns HTTP 2xx; `ApiError::status` retains the actual HTTP status. `ApiError::raw_response` contains at most 4 KiB and is not written to logs by the client. It is still application data: do not forward it to public logs without reviewing your own privacy policy.
 
 ## Next steps
 

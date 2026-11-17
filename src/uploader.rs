@@ -37,7 +37,7 @@
 //! ```
 
 use futures_util::StreamExt;
-use reqwest::{Body, StatusCode, header, multipart};
+use reqwest::{Body, header, multipart};
 use std::{
     fmt,
     path::Path,
@@ -52,8 +52,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use tracing::debug;
 
 use crate::{
-    bot::Bot,
-    errors::{ApiError, MaxError, Result, ValidationError},
+    bot::{Bot, api_error_from_response, response_reports_failure},
+    errors::{MaxError, Result, ValidationError},
     types::{Message, NewAttachment, NewMessageBody, UploadEndpoint, UploadResponse, UploadType},
 };
 
@@ -65,6 +65,8 @@ const MAX_IMAGE_SIZE: u64 = 50 * MEGABYTE;
 const MAX_VIDEO_SIZE: u64 = 250 * MEGABYTE;
 const MAX_AUDIO_SIZE: u64 = 256 * MEGABYTE;
 const MAX_FILE_SIZE: u64 = 4 * GIGABYTE;
+const MAX_UPLOAD_FILENAME_CHARS: usize = 255;
+const MAX_MULTIPART_PART_HEADERS_SIZE: usize = 512;
 
 /// Progress reported while streaming a file to MAX.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,6 +266,41 @@ fn validate_upload_filename(filename: &str) -> Result<()> {
         )
         .into());
     }
+    let characters = filename.chars().count();
+    if characters > MAX_UPLOAD_FILENAME_CHARS {
+        return Err(ValidationError::new(
+            "filename",
+            format!("length {characters} exceeds the {MAX_UPLOAD_FILENAME_CHARS} character limit"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_multipart_upload_filename(filename: &str, mime: &str) -> Result<()> {
+    validate_upload_filename(filename)?;
+
+    let header_size = "Content-Disposition: form-data; ".len()
+        + "name=\"data\"".len()
+        + "; filename=\"".len()
+        + filename.len()
+        + "\"".len()
+        + "\r\nContent-Type: ".len()
+        + mime.len()
+        + "\r\n\r\n".len();
+    if header_size > MAX_MULTIPART_PART_HEADERS_SIZE {
+        let overhead = header_size - filename.len();
+        let max_filename_size = MAX_MULTIPART_PART_HEADERS_SIZE.saturating_sub(overhead);
+        return Err(ValidationError::new(
+            "filename",
+            format!(
+                "UTF-8 size {} exceeds the {max_filename_size} byte limit for multipart upload with MIME `{mime}`",
+                filename.len()
+            ),
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -304,28 +341,6 @@ async fn validate_upload_file(path: &Path, upload_type: &UploadType) -> Result<u
 
     validate_upload_size(upload_type, metadata.len(), "path")?;
     Ok(metadata.len())
-}
-
-fn upload_api_error(status: StatusCode, body: String) -> ApiError {
-    let value = serde_json::from_str::<serde_json::Value>(&body).ok();
-    let code = value
-        .as_ref()
-        .and_then(|value| value.get("code"))
-        .and_then(serde_json::Value::as_str)
-        .map(String::from);
-    let message = value
-        .as_ref()
-        .and_then(|value| value.get("message"))
-        .and_then(serde_json::Value::as_str)
-        .map(String::from)
-        .unwrap_or_else(|| {
-            status
-                .canonical_reason()
-                .unwrap_or("MAX upload failed")
-                .to_string()
-        });
-
-    ApiError::new(status.as_u16(), code, message).with_raw_response(body)
 }
 
 fn is_retryable_upload_error(error: &MaxError) -> bool {
@@ -394,9 +409,10 @@ impl Bot {
         let total = validate_upload_file(path, &upload_type).await?;
         let filename = filename.into();
         validate_upload_filename(&filename)?;
+        let mime = mime.into();
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
         let response = self
-            .upload_file_to_url_body(&endpoint, path, filename, mime.into(), total, &options)
+            .upload_file_to_url_body(&endpoint, path, filename, mime, total, &options)
             .await?;
         token_from_upload_response(&endpoint, &response, upload_type)
     }
@@ -411,9 +427,10 @@ impl Bot {
     ) -> Result<String> {
         validate_upload_size(&upload_type, bytes.len() as u64, "bytes")?;
         let filename = filename.into();
-        validate_upload_filename(&filename)?;
+        let mime = mime.into();
+        validate_multipart_upload_filename(&filename, &mime)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
-        self.upload_bytes_to_url(&endpoint, bytes, filename, mime.into(), upload_type)
+        self.upload_bytes_to_url(&endpoint, bytes, filename, mime, upload_type)
             .await
     }
 
@@ -769,6 +786,7 @@ impl Bot {
         total: u64,
         options: &UploadOptions,
     ) -> Result<String> {
+        validate_multipart_upload_filename(&filename, &mime)?;
         let file = tokio::fs::File::open(path).await?;
         let uploaded = Arc::new(AtomicU64::new(0));
         let progress = options.progress.clone();
@@ -901,10 +919,10 @@ impl Bot {
         let status = response.status();
         let body = response.text().await?;
         debug!(status = status.as_u16(), "MAX upload response");
-        if status.is_success() {
+        if status.is_success() && !response_reports_failure(&body) {
             Ok(body)
         } else {
-            Err(upload_api_error(status, body).into())
+            Err(api_error_from_response(status, body, None).into())
         }
     }
 
@@ -943,6 +961,7 @@ impl Bot {
         filename: String,
         mime: String,
     ) -> Result<String> {
+        validate_multipart_upload_filename(&filename, &mime)?;
         let part = multipart::Part::bytes(bytes)
             .file_name(filename)
             .mime_str(&mime)
@@ -974,6 +993,7 @@ impl Bot {
         let total = validate_upload_file(path, &upload_type).await?;
         let filename = filename.into();
         validate_upload_filename(&filename)?;
+        let mime = mime.into();
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
 
         let response = self
@@ -981,7 +1001,7 @@ impl Bot {
                 &endpoint,
                 path,
                 filename,
-                mime.into(),
+                mime,
                 total,
                 &UploadOptions::default(),
             )
@@ -1003,11 +1023,12 @@ impl Bot {
     ) -> Result<Message> {
         validate_upload_size(&upload_type, bytes.len() as u64, "bytes")?;
         let filename = filename.into();
-        validate_upload_filename(&filename)?;
+        let mime = mime.into();
+        validate_multipart_upload_filename(&filename, &mime)?;
         let endpoint = self.get_upload_url(upload_type.clone()).await?;
 
         let attachment = self
-            .upload_bytes_to_url_as_attachment(&endpoint, bytes, filename, mime.into(), upload_type)
+            .upload_bytes_to_url_as_attachment(&endpoint, bytes, filename, mime, upload_type)
             .await?;
 
         self.send_uploaded_attachment(recipient, attachment, text)

@@ -146,7 +146,7 @@ let token = bot.upload_file(
 
 `upload_bytes` is intentionally memory-backed because the caller already owns a `Vec<u8>`.
 
-Before requesting `/uploads`, all file and byte helpers reject empty content and enforce MAX's decimal size limits: image 50 MB, video 250 MB, audio 256 MB, and file 4 GB. Image dimensions up to 7680x7680 and the 60-minute audio duration limit remain server-side checks.
+Before requesting `/uploads`, all file and byte helpers reject empty content and enforce MAX's decimal size limits: image 50 MB, video 250 MB, audio 256 MB, and file 4 GB. Filenames must be non-empty, contain at most 255 Unicode characters, and contain no control characters, quotes, or backslashes. For multipart uploads, the SDK also enforces MAX's 512-byte part-header limit; the available UTF-8 filename size therefore depends on the MIME length. For example, `text/plain` allows up to 426 filename bytes. Image dimensions up to 7680x7680 and the 60-minute audio duration limit remain server-side checks.
 
 ## Resumable upload
 
